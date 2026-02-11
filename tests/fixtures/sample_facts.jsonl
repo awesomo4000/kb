@@ -1,0 +1,24 @@
+{"edges":[["book","The Odyssey"],["author","Homer"],["genre","epic"],["year","-800"]],"source":"library"}
+{"edges":[["book","The Iliad"],["author","Homer"],["genre","epic"],["year","-750"]],"source":"library"}
+{"edges":[["book","The Republic"],["author","Plato"],["genre","philosophy"],["year","-380"]],"source":"library"}
+{"edges":[["book","Symposium"],["author","Plato"],["genre","philosophy"],["year","-385"]],"source":"library"}
+{"edges":[["book","Meditations"],["author","Marcus Aurelius"],["genre","philosophy"],["year","170"]],"source":"library"}
+{"edges":[["book","The Aeneid"],["author","Virgil"],["genre","epic"],["year","-19"]],"source":"library"}
+{"edges":[["book","Divine Comedy"],["author","Dante Alighieri"],["genre","epic"],["year","1320"]],"source":"library"}
+{"edges":[["book","The Canterbury Tales"],["author","Geoffrey Chaucer"],["genre","poetry"],["year","1400"]],"source":"library"}
+{"edges":[["book","Don Quixote"],["author","Miguel de Cervantes"],["genre","novel"],["year","1605"]],"source":"library"}
+{"edges":[["book","Paradise Lost"],["author","John Milton"],["genre","epic"],["year","1667"]],"source":"library"}
+{"edges":[["book","Hamlet"],["author","William Shakespeare"],["genre","drama"],["year","1600"]],"source":"library"}
+{"edges":[["book","Pride and Prejudice"],["author","Jane Austen"],["genre","novel"],["year","1813"]],"source":"library"}
+{"edges":[["rel","influenced-by"],["author","Virgil"],["author","Homer"]],"source":"scholar"}
+{"edges":[["rel","influenced-by"],["author","Dante Alighieri"],["author","Virgil"]],"source":"scholar"}
+{"edges":[["rel","influenced-by"],["author","John Milton"],["author","Virgil"]],"source":"scholar"}
+{"edges":[["rel","contemporary"],["author","Plato"],["author","Aristotle"]],"source":"scholar"}
+{"edges":[["rel","tagged"],["book","The Odyssey"],["tag","Greek"],["tag","Ancient"]],"source":"curator"}
+{"edges":[["rel","tagged"],["book","The Iliad"],["tag","Greek"],["tag","Ancient"],["tag","War"]],"source":"curator"}
+{"edges":[["rel","tagged"],["book","The Republic"],["tag","Greek"],["tag","Ancient"],["tag","Political"]],"source":"curator"}
+{"edges":[["rel","tagged"],["book","The Aeneid"],["tag","Roman"],["tag","Ancient"]],"source":"curator"}
+{"edges":[["rel","tagged"],["book","Divine Comedy"],["tag","Italian"],["tag","Medieval"]],"source":"curator"}
+{"edges":[["rel","in-collection"],["collection","Classics"],["book","The Odyssey"],["book","The Iliad"],["book","The Aeneid"]],"source":"curator"}
+{"edges":[["rel","in-collection"],["collection","Philosophy"],["book","The Republic"],["book","Symposium"],["book","Meditations"]],"source":"curator"}
+{"edges":[["rel","in-collection"],["collection","English Literature"],["book","The Canterbury Tales"],["book","Paradise Lost"],["book","Hamlet"],["book","Pride and Prejudice"]],"source":"curator"}
