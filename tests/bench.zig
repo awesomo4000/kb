@@ -47,24 +47,24 @@ fn benchUnique(store: *FactStore, allocator: std.mem.Allocator, path: [:0]const 
 
         var i: usize = 0;
         while (i < count) : (i += 1) {
-            var host_buf: [32]u8 = undefined;
-            var port_buf: [8]u8 = undefined;
-            var svc_buf: [16]u8 = undefined;
+            var item_buf: [32]u8 = undefined;
+            var cat_buf: [8]u8 = undefined;
+            var tag_buf: [16]u8 = undefined;
 
             // ALL UNIQUE - each entity appears in only one fact
-            const host_id = std.fmt.bufPrint(&host_buf, "10.{}.{}.{}", .{
+            const item_id = std.fmt.bufPrint(&item_buf, "item-{}-{}-{}", .{
                 (i / 65536) % 256,
                 (i / 256) % 256,
                 i % 256,
             }) catch unreachable;
 
-            const port_id = std.fmt.bufPrint(&port_buf, "{}", .{i}) catch unreachable;
-            const svc_id = std.fmt.bufPrint(&svc_buf, "svc-{}", .{i}) catch unreachable;
+            const cat_id = std.fmt.bufPrint(&cat_buf, "{}", .{i}) catch unreachable;
+            const tag_id = std.fmt.bufPrint(&tag_buf, "tag-{}", .{i}) catch unreachable;
 
             const entities = [_]Entity{
-                .{ .type = "host", .id = host_id },
-                .{ .type = "port", .id = port_id },
-                .{ .type = "service", .id = svc_id },
+                .{ .type = "item", .id = item_id },
+                .{ .type = "category", .id = cat_id },
+                .{ .type = "tag", .id = tag_id },
             };
 
             _ = try store.addFact(&entities, "bench");
@@ -94,23 +94,23 @@ fn benchShared(store: *FactStore, allocator: std.mem.Allocator, path: [:0]const 
 
         var i: usize = 0;
         while (i < count) : (i += 1) {
-            var host_buf: [32]u8 = undefined;
-            var port_buf: [8]u8 = undefined;
+            var item_buf: [32]u8 = undefined;
+            var cat_buf: [8]u8 = undefined;
 
-            // SHARED - same 100 ports, same service across all facts
-            const host_id = std.fmt.bufPrint(&host_buf, "10.0.{}.{}", .{
+            // SHARED - same 100 categories, same tag across all facts
+            const item_id = std.fmt.bufPrint(&item_buf, "item-{}-{}", .{
                 (i / 256) % 256,
                 i % 256,
             }) catch unreachable;
 
-            const port_id = std.fmt.bufPrint(&port_buf, "{}", .{
-                8000 + (i % 100),
+            const cat_id = std.fmt.bufPrint(&cat_buf, "{}", .{
+                1000 + (i % 100),
             }) catch unreachable;
 
             const entities = [_]Entity{
-                .{ .type = "host", .id = host_id },
-                .{ .type = "port", .id = port_id },
-                .{ .type = "service", .id = "http" }, // HOT KEY
+                .{ .type = "item", .id = item_id },
+                .{ .type = "category", .id = cat_id },
+                .{ .type = "tag", .id = "common" }, // HOT KEY
             };
 
             _ = try store.addFact(&entities, "bench");
@@ -149,23 +149,23 @@ fn benchBatched(store: *FactStore, allocator: std.mem.Allocator, path: [:0]const
 
             // Fill batch
             for (0..this_batch) |j| {
-                var host_buf: [32]u8 = undefined;
-                var port_buf: [8]u8 = undefined;
+                var item_buf: [32]u8 = undefined;
+                var cat_buf: [8]u8 = undefined;
 
                 const idx = i + j;
-                const host_id = std.fmt.bufPrint(&host_buf, "10.0.{}.{}", .{
+                const item_id = std.fmt.bufPrint(&item_buf, "item-{}-{}", .{
                     (idx / 256) % 256,
                     idx % 256,
                 }) catch unreachable;
 
-                const port_id = std.fmt.bufPrint(&port_buf, "{}", .{
-                    8000 + (idx % 100),
+                const cat_id = std.fmt.bufPrint(&cat_buf, "{}", .{
+                    1000 + (idx % 100),
                 }) catch unreachable;
 
                 entity_storage[j] = .{
-                    .{ .type = "host", .id = host_id },
-                    .{ .type = "port", .id = port_id },
-                    .{ .type = "service", .id = "http" },
+                    .{ .type = "item", .id = item_id },
+                    .{ .type = "category", .id = cat_id },
+                    .{ .type = "tag", .id = "common" },
                 };
                 batch[j] = .{ .entities = &entity_storage[j], .source = "bench" };
             }

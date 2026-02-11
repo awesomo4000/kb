@@ -111,19 +111,19 @@ pub const Fact = struct {
 };
 
 test "entity equality" {
-    const a = Entity{ .type = "host", .id = "10.2.3.12" };
-    const b = Entity{ .type = "host", .id = "10.2.3.12" };
-    const c = Entity{ .type = "host", .id = "10.2.3.13" };
+    const a = Entity{ .type = "book", .id = "odyssey" };
+    const b = Entity{ .type = "book", .id = "odyssey" };
+    const c = Entity{ .type = "book", .id = "iliad" };
     try std.testing.expect(a.eql(b));
     try std.testing.expect(!a.eql(c));
 }
 
 test "entity toKey" {
     const allocator = std.testing.allocator;
-    const entity = Entity{ .type = "host", .id = "10.2.3.12" };
+    const entity = Entity{ .type = "author", .id = "homer" };
     const key = try entity.toKey(allocator);
     defer allocator.free(key);
-    try std.testing.expectEqualStrings("host\x0010.2.3.12", key);
+    try std.testing.expectEqualStrings("author\x00homer", key);
 }
 
 test "fact serialize/deserialize roundtrip" {
@@ -132,8 +132,8 @@ test "fact serialize/deserialize roundtrip" {
     const original = Fact{
         .id = 42,
         .entities = &.{
-            .{ .type = "host", .id = "10.2.3.12" },
-            .{ .type = "port", .id = "8080" },
+            .{ .type = "book", .id = "odyssey" },
+            .{ .type = "author", .id = "homer" },
         },
         .source = "test-source",
     };

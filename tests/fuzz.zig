@@ -92,7 +92,7 @@ test "fuzz factstore add (corpus only)" {
     // This test only runs corpus, not continuous fuzzing
     // The FactStore requires disk I/O which is problematic for the fuzzer
     const corpus = [_][]const u8{
-        "host\x00192.168.1.1\x00port\x008080",
+        "book\x00odyssey\x00author\x00homer",
         "a\x00b\x00c\x00d",
         "type\x00id",
     };

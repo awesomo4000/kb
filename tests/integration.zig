@@ -33,24 +33,24 @@ test "add and query facts" {
 
     // Add a fact with two entities
     const entities = [_]Entity{
-        .{ .type = "host", .id = "10.2.3.12" },
-        .{ .type = "port", .id = "8080" },
+        .{ .type = "book", .id = "odyssey" },
+        .{ .type = "author", .id = "homer" },
     };
     const fact_id = try store.addFact(&entities, "test");
 
     try std.testing.expectEqual(@as(u64, 1), fact_id);
 
-    // Query by host
-    const host_facts = try store.getFactsByEntity(.{ .type = "host", .id = "10.2.3.12" }, allocator);
-    defer allocator.free(host_facts);
-    try std.testing.expectEqual(@as(usize, 1), host_facts.len);
-    try std.testing.expectEqual(fact_id, host_facts[0]);
+    // Query by book
+    const book_facts = try store.getFactsByEntity(.{ .type = "book", .id = "odyssey" }, allocator);
+    defer allocator.free(book_facts);
+    try std.testing.expectEqual(@as(usize, 1), book_facts.len);
+    try std.testing.expectEqual(fact_id, book_facts[0]);
 
-    // Query by port
-    const port_facts = try store.getFactsByEntity(.{ .type = "port", .id = "8080" }, allocator);
-    defer allocator.free(port_facts);
-    try std.testing.expectEqual(@as(usize, 1), port_facts.len);
-    try std.testing.expectEqual(fact_id, port_facts[0]);
+    // Query by author
+    const author_facts = try store.getFactsByEntity(.{ .type = "author", .id = "homer" }, allocator);
+    defer allocator.free(author_facts);
+    try std.testing.expectEqual(@as(usize, 1), author_facts.len);
+    try std.testing.expectEqual(fact_id, author_facts[0]);
 }
 
 test "batch insert stress test" {

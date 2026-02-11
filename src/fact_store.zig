@@ -256,10 +256,10 @@ fn decodeU64(bytes: []const u8) u64 {
 
 test "entity key encoding" {
     const allocator = std.testing.allocator;
-    const entity = Entity{ .type = "host", .id = "10.2.3.12" };
+    const entity = Entity{ .type = "author", .id = "homer" };
     const key = try entity.toKey(allocator);
     defer allocator.free(key);
-    try std.testing.expectEqualStrings("host\x0010.2.3.12", key);
+    try std.testing.expectEqualStrings("author\x00homer", key);
 }
 
 test "u64 encoding roundtrip" {
