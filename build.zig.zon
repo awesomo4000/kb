@@ -1,0 +1,17 @@
+.{
+    .name = .hold,
+    .version = "0.0.1",
+    .fingerprint = 0x1fca0d072a377a33,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .lmdb = .{
+            .url = "git+https://github.com/awesomo4000/zig-lmdb#main",
+            .hash = "lmdb-0.2.2-6TpzoI9zAAAFvaML8Cv-OukxQFE0nVArVnt2iedDG9kA",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
