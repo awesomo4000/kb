@@ -449,13 +449,13 @@ fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // Run evaluation
-    const start = std.time.milliTimestamp();
+    var timer = try std.time.Timer.start();
     try eval.evaluate();
-    const elapsed = std.time.milliTimestamp() - start;
+    const elapsed_ns = timer.read();
 
-    std.debug.print("Evaluation complete: {} derived facts in {}ms\n", .{
+    std.debug.print("Evaluation complete: {} derived facts in {d:.3}ms\n", .{
         eval.derived_facts.items.len,
-        elapsed,
+        @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0,
     });
 
     // Run queries from the file
