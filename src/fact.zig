@@ -61,6 +61,11 @@ pub const Fact = struct {
         const id = try reader.readInt(u64, .big);
         const entity_count = try reader.readInt(u32, .big);
 
+        // Sanity check: entity count can't exceed remaining bytes
+        // Each entity needs at least 4 bytes (2x u16 length fields)
+        const remaining = data.len - fbs.pos;
+        if (entity_count > remaining / 4) return error.InvalidData;
+
         var entities = try allocator.alloc(Entity, entity_count);
         errdefer allocator.free(entities);
 

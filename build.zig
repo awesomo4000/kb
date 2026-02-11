@@ -104,6 +104,21 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run benchmark");
     bench_step.dependOn(&run_bench.step);
 
+    // Fuzz corpus tests
+    const fuzz_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    fuzz_test.root_module.addImport("lmdb", lmdb_mod);
+    fuzz_test.root_module.addImport("kb", lib_mod);
+
+    const run_fuzz_test = b.addRunArtifact(fuzz_test);
+    const fuzz_step = b.step("test-fuzz", "Run fuzz corpus tests");
+    fuzz_step.dependOn(&run_fuzz_test.step);
+
     // Raw LMDB benchmark
     const bench_raw_mod = b.createModule(.{
         .root_source_file = b.path("tests/bench_raw.zig"),
