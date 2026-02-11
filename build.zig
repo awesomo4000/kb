@@ -4,6 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Sanitizer options
+    const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer") orelse false;
+
     // LMDB dependency
     const lmdb_dep = b.dependency("lmdb", .{
         .target = target,
@@ -48,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = sanitize_thread,
     });
     lib_test_mod.addImport("lmdb", lmdb_mod);
 
@@ -64,6 +68,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/integration.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = sanitize_thread,
     });
     integration_mod.addImport("lmdb", lmdb_mod);
     integration_mod.addImport("kb", lib_mod);

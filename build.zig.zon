@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .lmdb = .{
-            .url = "git+https://github.com/awesomo4000/zig-lmdb#main",
-            .hash = "lmdb-0.2.2-6TpzoI9zAAAFvaML8Cv-OukxQFE0nVArVnt2iedDG9kA",
+            .url = "git+https://github.com/awesomo4000/zig-lmdb#0.2.3",
+            .hash = "lmdb-0.2.3-6TpzoJF2AABKgN4EGtLanvhKlGB1w-6zMAMu5LCZ9q93",
         },
     },
     .paths = .{
