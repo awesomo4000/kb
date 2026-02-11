@@ -404,8 +404,10 @@ pub const Parser = struct {
         }
         try writer.print("  {s}\n", .{self.source[line_start..line_end]});
 
-        // Print caret
-        try writer.writeByteNTimes(' ', self.error_col + 1);
+        // Print caret (spaces + ^)
+        for (0..self.error_col + 1) |_| {
+            try writer.writeByte(' ');
+        }
         try writer.writeAll("^\n");
     }
 

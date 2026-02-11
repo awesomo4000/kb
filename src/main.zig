@@ -27,6 +27,8 @@ pub fn main() !void {
         };
     } else if (std.mem.eql(u8, command, "ingest")) {
         try cmdIngest(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "datalog")) {
+        try cmdDatalog(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help")) {
         try printUsage();
     } else {
@@ -45,9 +47,10 @@ fn printUsage() !void {
         \\Usage: kb <command> [args]
         \\
         \\Commands:
-        \\  get [path]    Query the fact store
-        \\  ingest        Read JSON facts from stdin
-        \\  help          Show this message
+        \\  get [path]         Query the fact store
+        \\  ingest <file>      Read JSON facts from file
+        \\  datalog <file>     Run Datalog rules against hypergraph
+        \\  help               Show this message
         \\
     );
     try stdout.flush();
@@ -388,4 +391,104 @@ fn cmdIngest(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     std.debug.print("Ingested {} facts\n", .{count});
+}
+
+fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const datalog = kb.datalog;
+    const HypergraphFactSource = kb.HypergraphFactSource;
+
+    if (args.len == 0) {
+        std.debug.print("Usage: kb datalog <rules.dl>\n", .{});
+        return;
+    }
+
+    // Build absolute path to store
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = try std.process.getCwd(&cwd_buf);
+    const store_path = try std.fs.path.joinZ(allocator, &.{ cwd, default_store_name });
+    defer allocator.free(store_path);
+
+    var store = try kb.FactStore.open(allocator, .{ .path = store_path });
+    defer store.close();
+
+    // Read Datalog rules file
+    const rules_content = try std.fs.cwd().readFileAlloc(allocator, args[0], 1024 * 1024);
+    defer allocator.free(rules_content);
+
+    // Parse rules
+    var parser = datalog.Parser.init(allocator, rules_content);
+    defer parser.deinit();
+
+    const parsed = parser.parseProgram() catch |err| {
+        std.debug.print("Parse error: {}\n", .{err});
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+        parser.formatError(&stderr_writer.interface) catch {};
+        stderr_writer.interface.flush() catch {};
+        return;
+    };
+
+    std.debug.print("Parsed {} rules, {} mappings, {} queries\n", .{
+        parsed.rules.len,
+        parsed.mappings.len,
+        parsed.queries.len,
+    });
+
+    // Create hypergraph fact source
+    var hg_source = HypergraphFactSource.init(&store, parsed.mappings);
+
+    // Create evaluator
+    var eval = datalog.Evaluator.initWithSource(allocator, parsed.rules, hg_source.source());
+    defer eval.deinit();
+
+    // Add any ground facts from rules (facts with empty body)
+    for (parsed.rules) |rule| {
+        if (rule.body.len == 0) {
+            try eval.addFact(rule.head);
+        }
+    }
+
+    // Run evaluation
+    const start = std.time.milliTimestamp();
+    try eval.evaluate();
+    const elapsed = std.time.milliTimestamp() - start;
+
+    std.debug.print("Evaluation complete: {} derived facts in {}ms\n", .{
+        eval.derived_facts.items.len,
+        elapsed,
+    });
+
+    // Run queries from the file
+    for (parsed.queries) |query_atoms| {
+        if (query_atoms.len == 0) continue;
+
+        const pattern = query_atoms[0]; // Single-atom queries for now
+        std.debug.print("\n?- {s}(", .{pattern.predicate});
+        for (pattern.terms, 0..) |term, i| {
+            if (i > 0) std.debug.print(", ", .{});
+            switch (term) {
+                .constant => |c| std.debug.print("\"{s}\"", .{c}),
+                .variable => |v| std.debug.print("{s}", .{v}),
+            }
+        }
+        std.debug.print(")\n", .{});
+
+        const results = try eval.query(pattern);
+        if (results.len == 0) {
+            std.debug.print("  (no results)\n", .{});
+        } else {
+            for (results) |binding| {
+                std.debug.print("  ", .{});
+                var first = true;
+                var iter = binding.iterator();
+                while (iter.next()) |entry| {
+                    if (!first) std.debug.print(", ", .{});
+                    std.debug.print("{s} = {s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+                    first = false;
+                }
+                std.debug.print("\n", .{});
+            }
+            std.debug.print("  ({} results)\n", .{results.len});
+        }
+    }
 }
