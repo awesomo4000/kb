@@ -393,6 +393,101 @@ fn cmdIngest(allocator: std.mem.Allocator, args: []const []const u8) !void {
     std.debug.print("Ingested {} facts\n", .{count});
 }
 
+/// Accumulated parse results from a file and all its includes
+const AccumulatedParse = struct {
+    rules: std.ArrayList(kb.datalog.Rule),
+    queries: std.ArrayList([]kb.datalog.Atom),
+    mappings: std.ArrayList(kb.datalog.Mapping),
+    parsers: std.ArrayList(kb.datalog.Parser), // Keep parsers alive (they own the memory)
+    file_contents: std.ArrayList([]const u8), // Keep file contents alive
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator) AccumulatedParse {
+        return .{
+            .rules = .{},
+            .queries = .{},
+            .mappings = .{},
+            .parsers = .{},
+            .file_contents = .{},
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(self: *AccumulatedParse) void {
+        // Deinit parsers (which frees the memory for rules/queries/mappings)
+        for (self.parsers.items) |*p| {
+            p.deinit();
+        }
+        self.parsers.deinit(self.allocator);
+        // Free file contents
+        for (self.file_contents.items) |content| {
+            self.allocator.free(content);
+        }
+        self.file_contents.deinit(self.allocator);
+        self.rules.deinit(self.allocator);
+        self.queries.deinit(self.allocator);
+        self.mappings.deinit(self.allocator);
+    }
+};
+
+/// Parse a Datalog file and recursively process @include directives
+fn parseDatalogWithIncludes(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    visited: *std.StringHashMap(void),
+    result: *AccumulatedParse,
+) !void {
+    // Resolve to absolute path for cycle detection
+    const abs_path = try std.fs.cwd().realpathAlloc(allocator, file_path);
+    defer allocator.free(abs_path);
+
+    // Check for cycles
+    if (visited.contains(abs_path)) {
+        return; // Already included, skip
+    }
+    try visited.put(try allocator.dupe(u8, abs_path), {});
+
+    // Read file content (keep it alive - parser references it)
+    const content = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| {
+        std.debug.print("Error reading {s}: {}\n", .{ file_path, err });
+        return err;
+    };
+    // Don't defer free - content is owned by parser arena
+
+    // Parse - keep parser alive, it owns the memory for rules/mappings/queries
+    var parser = kb.datalog.Parser.init(allocator, content);
+
+    const parsed = parser.parseProgram() catch |err| {
+        std.debug.print("Parse error in {s}: {}\n", .{ file_path, err });
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+        parser.formatError(&stderr_writer.interface) catch {};
+        stderr_writer.interface.flush() catch {};
+        parser.deinit();
+        allocator.free(content);
+        return err;
+    };
+
+    // Store parser and content so they stay alive
+    try result.parsers.append(allocator, parser);
+    try result.file_contents.append(allocator, content);
+
+    // Get directory of current file for resolving relative includes
+    const dir = std.fs.path.dirname(file_path) orelse ".";
+
+    // Process includes first (depth-first)
+    for (parsed.includes) |include_path| {
+        const resolved = try std.fs.path.join(allocator, &.{ dir, include_path });
+        defer allocator.free(resolved);
+        try parseDatalogWithIncludes(allocator, resolved, visited, result);
+    }
+
+    // Add rules, queries, mappings from this file
+    try result.rules.appendSlice(allocator, parsed.rules);
+    try result.queries.appendSlice(allocator, parsed.queries);
+    try result.mappings.appendSlice(allocator, parsed.mappings);
+}
+
 fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const datalog = kb.datalog;
     const HypergraphFactSource = kb.HypergraphFactSource;
@@ -411,38 +506,39 @@ fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var store = try kb.FactStore.open(allocator, .{ .path = store_path });
     defer store.close();
 
-    // Read Datalog rules file
-    const rules_content = try std.fs.cwd().readFileAlloc(allocator, args[0], 1024 * 1024);
-    defer allocator.free(rules_content);
+    // Parse rules file with include handling
+    var visited = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = visited.keyIterator();
+        while (it.next()) |key| {
+            allocator.free(key.*);
+        }
+        visited.deinit();
+    }
 
-    // Parse rules
-    var parser = datalog.Parser.init(allocator, rules_content);
-    defer parser.deinit();
+    var accumulated = AccumulatedParse.init(allocator);
+    defer accumulated.deinit();
 
-    const parsed = parser.parseProgram() catch |err| {
-        std.debug.print("Parse error: {}\n", .{err});
-        var stderr_buf: [4096]u8 = undefined;
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
-        parser.formatError(&stderr_writer.interface) catch {};
-        stderr_writer.interface.flush() catch {};
+    parseDatalogWithIncludes(allocator, args[0], &visited, &accumulated) catch |err| {
+        std.debug.print("Failed to parse: {}\n", .{err});
         return;
     };
 
     std.debug.print("Parsed {} rules, {} mappings, {} queries\n", .{
-        parsed.rules.len,
-        parsed.mappings.len,
-        parsed.queries.len,
+        accumulated.rules.items.len,
+        accumulated.mappings.items.len,
+        accumulated.queries.items.len,
     });
 
     // Create hypergraph fact source
-    var hg_source = HypergraphFactSource.init(&store, parsed.mappings);
+    var hg_source = HypergraphFactSource.init(&store, accumulated.mappings.items);
 
     // Create evaluator
-    var eval = datalog.Evaluator.initWithSource(allocator, parsed.rules, hg_source.source());
+    var eval = datalog.Evaluator.initWithSource(allocator, accumulated.rules.items, hg_source.source());
     defer eval.deinit();
 
     // Add any ground facts from rules (facts with empty body)
-    for (parsed.rules) |rule| {
+    for (accumulated.rules.items) |rule| {
         if (rule.body.len == 0) {
             try eval.addFact(rule.head);
         }
@@ -459,7 +555,7 @@ fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
     });
 
     // Run queries from the file
-    for (parsed.queries) |query_atoms| {
+    for (accumulated.queries.items) |query_atoms| {
         if (query_atoms.len == 0) continue;
 
         const pattern = query_atoms[0]; // Single-atom queries for now

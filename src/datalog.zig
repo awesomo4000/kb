@@ -437,12 +437,14 @@ pub const Parser = struct {
         rules: []Rule,
         queries: [][]Atom,
         mappings: []Mapping,
+        includes: [][]const u8,
     };
 
     pub fn parseProgram(self: *Parser) !ParseResult {
         var rules: std.ArrayList(Rule) = .{};
         var queries: std.ArrayList([]Atom) = .{};
         var mappings: std.ArrayList(Mapping) = .{};
+        var includes: std.ArrayList([]const u8) = .{};
 
         while (self.current.type != .eof) {
             if (self.current.type == .at) {
@@ -456,8 +458,18 @@ pub const Parser = struct {
                     self.advance();
                     const mapping = try self.parseMapping();
                     try mappings.append(self.allocator(), mapping);
+                } else if (std.mem.eql(u8, self.current.text, "include")) {
+                    self.advance();
+                    if (self.current.type != .string) {
+                        self.setError("expected string path after @include");
+                        return error.ExpectedString;
+                    }
+                    const path = try self.allocator().dupe(u8, self.current.text);
+                    try includes.append(self.allocator(), path);
+                    self.advance();
+                    try self.expect(.dot);
                 } else {
-                    self.setError("unknown directive (expected 'map')");
+                    self.setError("unknown directive (expected 'map' or 'include')");
                     return error.UnexpectedToken;
                 }
             } else if (self.current.type == .query) {
@@ -477,6 +489,7 @@ pub const Parser = struct {
             .rules = try rules.toOwnedSlice(self.allocator()),
             .queries = try queries.toOwnedSlice(self.allocator()),
             .mappings = try mappings.toOwnedSlice(self.allocator()),
+            .includes = try includes.toOwnedSlice(self.allocator()),
         };
     }
 
