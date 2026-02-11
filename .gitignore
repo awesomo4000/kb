@@ -1,5 +1,6 @@
-.DS_Store
+docs/
 .zig-cache/
 zig-out/
+.DS_Store
 .kb/
 x/

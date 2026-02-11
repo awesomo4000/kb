@@ -835,6 +835,7 @@ pub const Evaluator = struct {
     arena: std.heap.ArenaAllocator,
     base_facts: ?FactSource,           // External fact source (optional)
     derived_facts: std.ArrayList(Atom), // Facts derived by rules
+    by_predicate: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Atom)), // Predicate index
     rules: []Rule,
 
     /// Init with no external fact source (pure in-memory mode)
@@ -843,6 +844,7 @@ pub const Evaluator = struct {
             .arena = std.heap.ArenaAllocator.init(backing_allocator),
             .base_facts = null,
             .derived_facts = .{},
+            .by_predicate = .{},
             .rules = rules,
         };
     }
@@ -853,6 +855,7 @@ pub const Evaluator = struct {
             .arena = std.heap.ArenaAllocator.init(backing_allocator),
             .base_facts = source,
             .derived_facts = .{},
+            .by_predicate = .{},
             .rules = rules,
         };
     }
@@ -867,21 +870,40 @@ pub const Evaluator = struct {
 
     /// Add a fact to derived facts (for initial facts when no base_facts source)
     pub fn addFact(self: *Evaluator, atom: Atom) !void {
-        // Check if already exists in derived
-        for (self.derived_facts.items) |existing| {
-            if (existing.eql(atom)) return;
+        // Check if already exists using predicate index (O(n) within predicate, not all facts)
+        if (self.by_predicate.get(atom.predicate)) |facts_for_pred| {
+            for (facts_for_pred.items) |existing| {
+                if (existing.eql(atom)) return;
+            }
         }
-        // Dupe into arena
+        // Dupe into arena and add to both lists
         const duped = try atom.dupe(self.allocator());
         try self.derived_facts.append(self.allocator(), duped);
+        try self.indexFact(duped);
+    }
+
+    /// Add a fact to the predicate index
+    fn indexFact(self: *Evaluator, atom: Atom) !void {
+        const alloc = self.allocator();
+        const gop = try self.by_predicate.getOrPut(alloc, atom.predicate);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{};
+        }
+        try gop.value_ptr.append(alloc, atom);
+    }
+
+    /// Check if a fact exists in derived facts (uses predicate index)
+    fn factExistsInDerived(self: *Evaluator, atom: Atom) bool {
+        const facts_for_pred = self.by_predicate.get(atom.predicate) orelse return false;
+        for (facts_for_pred.items) |existing| {
+            if (existing.eql(atom)) return true;
+        }
+        return false;
     }
 
     /// Check if a fact exists (in derived or base)
     fn factExists(self: *Evaluator, atom: Atom) !bool {
-        // Check derived facts
-        for (self.derived_facts.items) |existing| {
-            if (existing.eql(atom)) return true;
-        }
+        if (self.factExistsInDerived(atom)) return true;
         // Check base facts if we have a source
         if (self.base_facts) |source| {
             const matches = try source.matchAtom(atom, self.allocator());
@@ -909,16 +931,10 @@ pub const Evaluator = struct {
                 // For each binding, instantiate the head
                 for (bindings) |binding| {
                     const new_fact = try self.substitute(rule.head, binding);
-                    // Check if exists in derived (base facts are read-only)
-                    var exists = false;
-                    for (self.derived_facts.items) |existing| {
-                        if (existing.eql(new_fact)) {
-                            exists = true;
-                            break;
-                        }
-                    }
-                    if (!exists) {
+                    // Check if exists using predicate index (O(n) within predicate)
+                    if (!self.factExistsInDerived(new_fact)) {
                         try self.derived_facts.append(self.allocator(), new_fact);
+                        try self.indexFact(new_fact);
                         changed = true;
                     }
                 }
@@ -936,8 +952,10 @@ pub const Evaluator = struct {
         const alloc = self.allocator();
         var results: std.ArrayList(Binding) = .{};
 
-        // Match against derived facts
-        try self.matchAtomAgainstList(pattern, self.derived_facts.items, &results);
+        // Match against derived facts using predicate index (O(1) lookup + O(n) within predicate)
+        if (self.by_predicate.get(pattern.predicate)) |facts_for_pred| {
+            try self.matchAtomAgainstList(pattern, facts_for_pred.items, &results);
+        }
 
         // Match against base facts if we have a source
         if (self.base_facts) |source| {
@@ -954,7 +972,7 @@ pub const Evaluator = struct {
         const alloc = self.allocator();
 
         for (facts) |fact| {
-            if (!std.mem.eql(u8, fact.predicate, pattern.predicate)) continue;
+            // Predicate already matched by index lookup, just check arity
             if (fact.terms.len != pattern.terms.len) continue;
 
             var binding = Binding.init(alloc);
