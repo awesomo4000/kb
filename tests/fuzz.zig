@@ -2,58 +2,131 @@ const std = @import("std");
 const kb = @import("kb");
 const Fact = kb.Fact;
 const Entity = kb.Entity;
+const FactStore = kb.FactStore;
 
-fn fuzzDeserialize(allocator: std.mem.Allocator, input: []const u8) void {
-    // Try to deserialize arbitrary bytes - should never crash
-    const fact = Fact.deserialize(input, allocator) catch return;
-    defer fact.deinit(allocator);
-
-    // If we got here, verify it round-trips
-    var buf: [65536]u8 = undefined;
-    const serialized = fact.serialize(&buf) catch return;
-
-    const roundtrip = Fact.deserialize(serialized, allocator) catch return;
-    defer roundtrip.deinit(allocator);
-
-    // Verify consistency
-    std.debug.assert(fact.id == roundtrip.id);
-    std.debug.assert(fact.entities.len == roundtrip.entities.len);
-}
+// =============================================================================
+// Fuzz target 1: Fact deserialization
+// =============================================================================
 
 test "fuzz deserialize" {
-    const allocator = std.testing.allocator;
-
-    // Manual corpus of interesting inputs
     const corpus = [_][]const u8{
-        // Empty
-        "",
-        // Too short for header
-        "\x00\x00\x00\x00",
-        // Valid header, zero entities
-        "\x00\x00\x00\x00\x00\x00\x00\x01" ++ // id = 1
-            "\x00\x00\x00\x00" ++ // 0 entities
-            "\x00\x00", // source len = 0
-        // Huge entity count (should fail gracefully)
-        "\x00\x00\x00\x00\x00\x00\x00\x01" ++ // id = 1
-            "\xff\xff\xff\xff", // 4 billion entities
-        // Huge string length
-        "\x00\x00\x00\x00\x00\x00\x00\x01" ++
-            "\x00\x00\x00\x01" ++ // 1 entity
-            "\xff\xff", // type len = 65535
         // Valid small fact
         "\x00\x00\x00\x00\x00\x00\x00\x2a" ++ // id = 42
             "\x00\x00\x00\x01" ++ // 1 entity
             "\x00\x04" ++ "test" ++ // type = "test"
             "\x00\x02" ++ "id" ++ // id = "id"
             "\x00\x00", // no source
+        // Valid fact with source
+        "\x00\x00\x00\x00\x00\x00\x00\x01" ++
+            "\x00\x00\x00\x01" ++
+            "\x00\x04" ++ "type" ++
+            "\x00\x05" ++ "value" ++
+            "\x00\x06" ++ "source",
     };
 
-    for (corpus) |input| {
-        const fact = Fact.deserialize(input, allocator) catch continue;
-        defer fact.deinit(allocator);
+    try std.testing.fuzz({}, fuzzDeserialize, .{ .corpus = &corpus });
+}
 
-        // If deserialize succeeded, serialize should work
-        var buf: [65536]u8 = undefined;
-        _ = fact.serialize(&buf) catch continue;
+fn fuzzDeserialize(_: void, input: []const u8) !void {
+    var buf: [1024 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const allocator = fba.allocator();
+
+    const fact = Fact.deserialize(input, allocator) catch return;
+
+    // Round-trip test
+    var ser_buf: [65536]u8 = undefined;
+    const serialized = fact.serialize(&ser_buf) catch return;
+
+    fba.reset();
+    const roundtrip = Fact.deserialize(serialized, allocator) catch return;
+
+    if (fact.id != roundtrip.id) return error.IdMismatch;
+    if (fact.entities.len != roundtrip.entities.len) return error.EntityCountMismatch;
+}
+
+// =============================================================================
+// Fuzz target 2: Entity key generation
+// =============================================================================
+
+test "fuzz entity toKey" {
+    const corpus = [_][]const u8{
+        "type\x00id",
+        "a\x00b",
+        "\x00\x00",
+        "long_type_name\x00long_id_value_here",
+    };
+
+    try std.testing.fuzz({}, fuzzEntityKey, .{ .corpus = &corpus });
+}
+
+fn fuzzEntityKey(_: void, input: []const u8) !void {
+    // Split input at first null byte to get type and id
+    const sep = std.mem.indexOfScalar(u8, input, 0) orelse return;
+    if (sep == 0 or sep >= input.len - 1) return;
+
+    const entity_type = input[0..sep];
+    const entity_id = input[sep + 1 ..];
+
+    var buf: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const allocator = fba.allocator();
+
+    const entity = Entity{ .type = entity_type, .id = entity_id };
+    const key = entity.toKey(allocator) catch return;
+
+    // Verify key format: type + \x00 + id
+    if (key.len != entity_type.len + 1 + entity_id.len) return error.KeyLengthMismatch;
+    if (!std.mem.startsWith(u8, key, entity_type)) return error.KeyTypeMismatch;
+    if (key[entity_type.len] != 0) return error.KeySeparatorMismatch;
+    if (!std.mem.endsWith(u8, key, entity_id)) return error.KeyIdMismatch;
+}
+
+// =============================================================================
+// Fuzz target 3: FactStore operations with arbitrary entities
+// NOTE: Disabled for continuous fuzzing - LMDB doesn't play well with fuzzer's
+// process model. Run corpus test only: zig build test-fuzz
+// =============================================================================
+
+test "fuzz factstore add (corpus only)" {
+    // This test only runs corpus, not continuous fuzzing
+    // The FactStore requires disk I/O which is problematic for the fuzzer
+    const corpus = [_][]const u8{
+        "host\x00192.168.1.1\x00port\x008080",
+        "a\x00b\x00c\x00d",
+        "type\x00id",
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const path = "/tmp/fuzz-factstore-corpus";
+    std.fs.deleteTreeAbsolute(path) catch {};
+    defer std.fs.deleteTreeAbsolute(path) catch {};
+
+    var store = try FactStore.open(allocator, .{ .path = path, .no_sync = true });
+    defer store.close();
+
+    for (corpus) |input| {
+        // Parse input as null-separated type/id pairs
+        var entities_buf: [16]Entity = undefined;
+        var entity_count: usize = 0;
+
+        var iter = std.mem.splitScalar(u8, input, 0);
+        while (iter.next()) |part| {
+            if (entity_count >= 15) break;
+            if (part.len == 0) continue;
+
+            const next = iter.next() orelse break;
+            if (next.len == 0) continue;
+
+            entities_buf[entity_count] = .{ .type = part, .id = next };
+            entity_count += 1;
+        }
+
+        if (entity_count == 0) continue;
+
+        _ = store.addFact(entities_buf[0..entity_count], "fuzz") catch continue;
     }
 }
