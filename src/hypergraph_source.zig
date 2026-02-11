@@ -31,9 +31,9 @@ pub const HypergraphFactSource = struct {
 
     fn matchAtomImpl(ptr: *anyopaque, pattern: datalog.Atom, alloc: Allocator) Allocator.Error![]datalog.Binding {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        return self.matchAtom(pattern, alloc) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return &[_]datalog.Binding{}, // Other errors -> no results
+        return self.matchAtom(pattern, alloc) catch |err| {
+            // Convert any error to empty results (except OOM which propagates)
+            return if (err == error.OutOfMemory) error.OutOfMemory else &[_]datalog.Binding{};
         };
     }
 
@@ -105,6 +105,7 @@ pub const HypergraphFactSource = struct {
     }
 
     /// Match a hypergraph fact against the Datalog pattern using the mapping
+    /// Uses POSITIONAL matching - pattern[i] matches fact_entities[i]
     fn matchFactAgainstPattern(
         self: *Self,
         fact_entities: []const Entity,
@@ -112,15 +113,19 @@ pub const HypergraphFactSource = struct {
         mapping: datalog.Mapping,
         alloc: Allocator,
     ) !?datalog.Binding {
+        // Pattern and fact must have same number of entities
+        if (mapping.pattern.len != fact_entities.len) {
+            return null;
+        }
+
         var binding = datalog.Binding.init(alloc);
 
-        // For each element in the mapping pattern, find matching entity in fact
-        for (mapping.pattern) |elem| {
-            // Find entity in fact with matching type
-            const fact_entity = self.findEntityByType(fact_entities, elem.entity_type) orelse {
-                // Fact doesn't have required entity type
+        // Positional matching: pattern[i] matches fact_entities[i]
+        for (mapping.pattern, fact_entities) |elem, fact_entity| {
+            // Type must match
+            if (!std.mem.eql(u8, elem.entity_type, fact_entity.type)) {
                 return null;
-            };
+            }
 
             switch (elem.value) {
                 .constant => |c| {
@@ -150,7 +155,8 @@ pub const HypergraphFactSource = struct {
                                     return null;
                                 }
                             } else {
-                                try binding.put(var_name, fact_entity.id);
+                                // Dupe the value since fact will be freed after this loop
+                                try binding.put(var_name, try alloc.dupe(u8, fact_entity.id));
                             }
                         },
                     }

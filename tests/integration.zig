@@ -170,3 +170,75 @@ test "get fact by id" {
     const missing = try store.getFact(9999, allocator);
     try std.testing.expect(missing == null);
 }
+
+test "datalog with hypergraph source" {
+    const allocator = std.testing.allocator;
+    const path = try getTempPath(allocator);
+    defer allocator.free(path);
+    defer std.fs.deleteTreeAbsolute(path) catch {};
+
+    // Create hypergraph with literary influence data
+    var store = try FactStore.open(allocator, .{ .path = path });
+    defer store.close();
+
+    // Add facts: [rel:influenced, author:X, author:Y]
+    _ = try store.addFact(&.{
+        .{ .type = "rel", .id = "influenced" },
+        .{ .type = "author", .id = "Homer" },
+        .{ .type = "author", .id = "Virgil" },
+    }, "test");
+    _ = try store.addFact(&.{
+        .{ .type = "rel", .id = "influenced" },
+        .{ .type = "author", .id = "Virgil" },
+        .{ .type = "author", .id = "Dante" },
+    }, "test");
+    _ = try store.addFact(&.{
+        .{ .type = "rel", .id = "influenced" },
+        .{ .type = "author", .id = "Virgil" },
+        .{ .type = "author", .id = "Milton" },
+    }, "test");
+
+    // Parse Datalog rules with @map
+    var parser = datalog.Parser.init(allocator,
+        \\@map influenced(A, B) = [rel:influenced, author:A, author:B].
+        \\
+        \\% Transitive influence
+        \\influenced_t(A, B) :- influenced(A, B).
+        \\influenced_t(A, C) :- influenced(A, B), influenced_t(B, C).
+    );
+    defer parser.deinit();
+
+    const parsed = try parser.parseProgram();
+
+    // Create hypergraph fact source with mappings
+    var hg_source = HypergraphFactSource.init(&store, parsed.mappings, allocator);
+
+    // Create evaluator with hypergraph as base facts
+    var eval = datalog.Evaluator.initWithSource(allocator, parsed.rules, hg_source.source());
+    defer eval.deinit();
+
+    // Run evaluation
+    try eval.evaluate();
+
+    // Query: Who did Homer influence transitively?
+    var q1_terms = [_]datalog.Term{ .{ .constant = "Homer" }, .{ .variable = "Who" } };
+    const results = try eval.query(.{ .predicate = "influenced_t", .terms = &q1_terms });
+
+    // Homer -> Virgil -> Dante, Milton
+    // So Homer influenced: Virgil, Dante, Milton (3 total)
+    try std.testing.expectEqual(@as(usize, 3), results.len);
+
+    // Verify we got the right people
+    var found_virgil = false;
+    var found_dante = false;
+    var found_milton = false;
+    for (results) |binding| {
+        const who = binding.get("Who").?;
+        if (std.mem.eql(u8, who, "Virgil")) found_virgil = true;
+        if (std.mem.eql(u8, who, "Dante")) found_dante = true;
+        if (std.mem.eql(u8, who, "Milton")) found_milton = true;
+    }
+    try std.testing.expect(found_virgil);
+    try std.testing.expect(found_dante);
+    try std.testing.expect(found_milton);
+}
