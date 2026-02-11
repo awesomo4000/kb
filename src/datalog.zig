@@ -118,6 +118,36 @@ pub const Rule = struct {
     }
 };
 
+/// Mapping from Datalog predicate to hypergraph pattern
+/// @map influenced(A, B) = [rel:influenced-by, author:A, author:B].
+pub const Mapping = struct {
+    predicate: []const u8,
+    args: []const []const u8, // Variable names in order
+    pattern: []const PatternElement,
+
+    pub const PatternElement = struct {
+        entity_type: []const u8, // e.g., "rel", "author"
+        value: union(enum) {
+            constant: []const u8, // e.g., "influenced-by"
+            variable: []const u8, // e.g., "A" - references an arg
+        },
+    };
+
+    pub fn free(self: Mapping, allocator: Allocator) void {
+        allocator.free(self.predicate);
+        for (self.args) |a| allocator.free(a);
+        allocator.free(self.args);
+        for (self.pattern) |p| {
+            allocator.free(p.entity_type);
+            switch (p.value) {
+                .constant => |c| allocator.free(c),
+                .variable => |v| allocator.free(v),
+            }
+        }
+        allocator.free(self.pattern);
+    }
+};
+
 // =============================================================================
 // Lexer
 // =============================================================================
@@ -127,8 +157,13 @@ pub const TokenType = enum {
     string, // "hello"
     lparen, // (
     rparen, // )
+    lbracket, // [
+    rbracket, // ]
     comma, // ,
     dot, // .
+    colon, // :
+    equals, // =
+    at, // @
     turnstile, // :-
     query, // ?-
     eof,
@@ -166,14 +201,21 @@ pub const Lexer = struct {
         // Single character tokens
         if (c == '(') return self.advance(.lparen);
         if (c == ')') return self.advance(.rparen);
+        if (c == '[') return self.advance(.lbracket);
+        if (c == ']') return self.advance(.rbracket);
         if (c == ',') return self.advance(.comma);
         if (c == '.') return self.advance(.dot);
+        if (c == '=') return self.advance(.equals);
+        if (c == '@') return self.advance(.at);
 
-        // :- turnstile
-        if (c == ':' and self.peek(1) == '-') {
-            self.pos += 2;
-            self.col += 2;
-            return .{ .type = .turnstile, .text = ":-", .line = self.line, .col = start_col };
+        // :- turnstile or just :
+        if (c == ':') {
+            if (self.peek(1) == '-') {
+                self.pos += 2;
+                self.col += 2;
+                return .{ .type = .turnstile, .text = ":-", .line = self.line, .col = start_col };
+            }
+            return self.advance(.colon);
         }
 
         // ?- query
@@ -295,6 +337,10 @@ pub const ParseError = error{
     ExpectedIdentifier,
     ExpectedLParen,
     ExpectedRParen,
+    ExpectedLBracket,
+    ExpectedRBracket,
+    ExpectedColon,
+    ExpectedEquals,
     ExpectedCommaOrRParen,
     ExpectedDotOrTurnstile,
     OutOfMemory,
@@ -304,6 +350,12 @@ pub const Parser = struct {
     lexer: Lexer,
     current: Token,
     allocator: Allocator,
+    source: []const u8,
+
+    // Error context - populated when parse fails
+    error_line: usize = 0,
+    error_col: usize = 0,
+    error_msg: []const u8 = "",
 
     pub fn init(allocator: Allocator, source: []const u8) Parser {
         var lexer = Lexer.init(source);
@@ -312,15 +364,91 @@ pub const Parser = struct {
             .lexer = lexer,
             .current = first_token,
             .allocator = allocator,
+            .source = source,
         };
     }
 
-    pub fn parseProgram(self: *Parser) !struct { rules: []Rule, queries: [][]Atom } {
+    /// Get a nice error message with source context
+    pub fn formatError(self: *const Parser, writer: anytype) !void {
+        if (self.error_line == 0) return;
+
+        try writer.print("error: {s} at line {}, col {}\n", .{
+            self.error_msg, self.error_line, self.error_col
+        });
+
+        // Find the line in source
+        var line_start: usize = 0;
+        var current_line: usize = 1;
+        for (self.source, 0..) |c, i| {
+            if (current_line == self.error_line) {
+                line_start = i;
+                break;
+            }
+            if (c == '\n') current_line += 1;
+        }
+
+        // Print the line
+        var line_end = line_start;
+        while (line_end < self.source.len and self.source[line_end] != '\n') {
+            line_end += 1;
+        }
+        try writer.print("  {s}\n", .{self.source[line_start..line_end]});
+
+        // Print caret
+        try writer.writeByteNTimes(' ', self.error_col + 1);
+        try writer.writeAll("^\n");
+    }
+
+    fn setError(self: *Parser, msg: []const u8) void {
+        self.error_line = self.current.line;
+        self.error_col = self.current.col;
+        self.error_msg = msg;
+    }
+
+    /// Get error info as a struct (for programmatic access)
+    pub const ErrorInfo = struct {
+        line: usize,
+        col: usize,
+        msg: []const u8,
+    };
+
+    pub fn getLastError(self: *const Parser) ?ErrorInfo {
+        if (self.error_line == 0) return null;
+        return .{
+            .line = self.error_line,
+            .col = self.error_col,
+            .msg = self.error_msg,
+        };
+    }
+
+    pub const ParseResult = struct {
+        rules: []Rule,
+        queries: [][]Atom,
+        mappings: []Mapping,
+    };
+
+    pub fn parseProgram(self: *Parser) !ParseResult {
         var rules: std.ArrayList(Rule) = .{};
         var queries: std.ArrayList([]Atom) = .{};
+        var mappings: std.ArrayList(Mapping) = .{};
 
         while (self.current.type != .eof) {
-            if (self.current.type == .query) {
+            if (self.current.type == .at) {
+                // Directive: @map or @include
+                self.advance();
+                if (self.current.type != .identifier) {
+                    self.setError("expected directive name after @");
+                    return error.ExpectedIdentifier;
+                }
+                if (std.mem.eql(u8, self.current.text, "map")) {
+                    self.advance();
+                    const mapping = try self.parseMapping();
+                    try mappings.append(self.allocator, mapping);
+                } else {
+                    self.setError("unknown directive (expected 'map')");
+                    return error.UnexpectedToken;
+                }
+            } else if (self.current.type == .query) {
                 // Query: ?- body.
                 self.advance();
                 const body = try self.parseBody();
@@ -336,6 +464,7 @@ pub const Parser = struct {
         return .{
             .rules = try rules.toOwnedSlice(self.allocator),
             .queries = try queries.toOwnedSlice(self.allocator),
+            .mappings = try mappings.toOwnedSlice(self.allocator),
         };
     }
 
@@ -355,6 +484,7 @@ pub const Parser = struct {
             return .{ .head = head, .body = body };
         }
 
+        self.setError("expected '.' or ':-' after atom");
         return error.ExpectedDotOrTurnstile;
     }
 
@@ -375,6 +505,7 @@ pub const Parser = struct {
 
     fn parseAtom(self: *Parser) ParseError!Atom {
         if (self.current.type != .identifier) {
+            self.setError("expected predicate name");
             return error.ExpectedIdentifier;
         }
 
@@ -423,14 +554,158 @@ pub const Parser = struct {
             return .{ .constant = text };
         }
 
+        self.setError("expected variable, constant, or string");
+        return error.UnexpectedToken;
+    }
+
+    /// Parse: predicate(A, B) = [type:val, type:Var].
+    fn parseMapping(self: *Parser) ParseError!Mapping {
+        // Parse predicate name
+        if (self.current.type != .identifier) {
+            self.setError("expected predicate name in @map");
+            return error.ExpectedIdentifier;
+        }
+        const predicate = try self.allocator.dupe(u8, self.current.text);
+        self.advance();
+
+        // Parse argument list
+        try self.expect(.lparen);
+        var args: std.ArrayList([]const u8) = .{};
+
+        if (self.current.type != .rparen) {
+            // First argument (must be variable - uppercase)
+            if (self.current.type != .identifier) {
+                self.setError("expected argument name in @map");
+                return error.ExpectedIdentifier;
+            }
+            try args.append(self.allocator, try self.allocator.dupe(u8, self.current.text));
+            self.advance();
+
+            // Additional arguments
+            while (self.current.type == .comma) {
+                self.advance();
+                if (self.current.type != .identifier) {
+                    self.setError("expected argument name after ','");
+                    return error.ExpectedIdentifier;
+                }
+                try args.append(self.allocator, try self.allocator.dupe(u8, self.current.text));
+                self.advance();
+            }
+        }
+        try self.expect(.rparen);
+
+        // Parse =
+        if (self.current.type != .equals) {
+            self.setError("expected '=' after @map predicate");
+            return error.ExpectedEquals;
+        }
+        self.advance();
+
+        // Parse pattern: [type:val, type:Var, ...]
+        if (self.current.type != .lbracket) {
+            self.setError("expected '[' to start pattern");
+            return error.ExpectedLBracket;
+        }
+        self.advance();
+
+        var pattern: std.ArrayList(Mapping.PatternElement) = .{};
+
+        if (self.current.type != .rbracket) {
+            // First element
+            const elem = try self.parsePatternElement();
+            try pattern.append(self.allocator, elem);
+
+            // Additional elements
+            while (self.current.type == .comma) {
+                self.advance();
+                const next_elem = try self.parsePatternElement();
+                try pattern.append(self.allocator, next_elem);
+            }
+        }
+
+        if (self.current.type != .rbracket) {
+            self.setError("expected ']' to close pattern");
+            return error.ExpectedRBracket;
+        }
+        self.advance();
+
+        // Expect trailing dot
+        try self.expect(.dot);
+
+        return .{
+            .predicate = predicate,
+            .args = try args.toOwnedSlice(self.allocator),
+            .pattern = try pattern.toOwnedSlice(self.allocator),
+        };
+    }
+
+    /// Parse: type:value or type:Variable
+    fn parsePatternElement(self: *Parser) ParseError!Mapping.PatternElement {
+        // Entity type
+        if (self.current.type != .identifier) {
+            self.setError("expected entity type in pattern");
+            return error.ExpectedIdentifier;
+        }
+        const entity_type = try self.allocator.dupe(u8, self.current.text);
+        self.advance();
+
+        // Colon separator
+        if (self.current.type != .colon) {
+            self.setError("expected ':' after entity type");
+            return error.ExpectedColon;
+        }
+        self.advance();
+
+        // Value: either identifier or string
+        if (self.current.type == .string) {
+            // Quoted string -> constant
+            const val = try self.allocator.dupe(u8, self.current.text);
+            self.advance();
+            return .{
+                .entity_type = entity_type,
+                .value = .{ .constant = val },
+            };
+        } else if (self.current.type == .identifier) {
+            const text = self.current.text;
+            const duped = try self.allocator.dupe(u8, text);
+            self.advance();
+
+            // Uppercase -> variable reference, lowercase -> constant
+            if (text.len > 0 and text[0] >= 'A' and text[0] <= 'Z') {
+                return .{
+                    .entity_type = entity_type,
+                    .value = .{ .variable = duped },
+                };
+            } else {
+                return .{
+                    .entity_type = entity_type,
+                    .value = .{ .constant = duped },
+                };
+            }
+        }
+
         return error.UnexpectedToken;
     }
 
     fn expect(self: *Parser, expected: TokenType) ParseError!void {
         if (self.current.type != expected) {
+            const msg = switch (expected) {
+                .lparen => "expected '('",
+                .rparen => "expected ')'",
+                .lbracket => "expected '['",
+                .rbracket => "expected ']'",
+                .dot => "expected '.'",
+                .comma => "expected ','",
+                .colon => "expected ':'",
+                .equals => "expected '='",
+                else => "unexpected token",
+            };
+            self.setError(msg);
             return switch (expected) {
                 .lparen => error.ExpectedLParen,
                 .rparen => error.ExpectedRParen,
+                .lbracket => error.ExpectedLBracket,
+                .rbracket => error.ExpectedRBracket,
                 else => error.UnexpectedToken,
             };
         }
@@ -443,20 +718,131 @@ pub const Parser = struct {
 };
 
 // =============================================================================
-// Evaluator (Bottom-up / Naive) - Uses arena for all allocations
+// FactSource Interface - abstracts where base facts come from
 // =============================================================================
 
 pub const Binding = std.StringHashMap([]const u8);
 
+pub const FactSource = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Match a pattern against facts, return variable bindings
+        matchAtom: *const fn (ptr: *anyopaque, pattern: Atom, allocator: Allocator) Allocator.Error![]Binding,
+    };
+
+    pub fn matchAtom(self: FactSource, pattern: Atom, alloc: Allocator) Allocator.Error![]Binding {
+        return self.vtable.matchAtom(self.ptr, pattern, alloc);
+    }
+};
+
+/// In-memory fact storage - default implementation
+pub const MemoryFactSource = struct {
+    facts: std.ArrayList(Atom),
+    alloc: Allocator,
+
+    pub fn init(alloc: Allocator) MemoryFactSource {
+        return .{ .facts = .{}, .alloc = alloc };
+    }
+
+    pub fn addFact(self: *MemoryFactSource, atom: Atom) !void {
+        for (self.facts.items) |existing| {
+            if (existing.eql(atom)) return;
+        }
+        const duped = try atom.dupe(self.alloc);
+        try self.facts.append(self.alloc, duped);
+    }
+
+    pub fn source(self: *MemoryFactSource) FactSource {
+        return .{
+            .ptr = self,
+            .vtable = &.{ .matchAtom = matchAtomImpl },
+        };
+    }
+
+    fn matchAtomImpl(ptr: *anyopaque, pattern: Atom, alloc: Allocator) Allocator.Error![]Binding {
+        const self: *MemoryFactSource = @ptrCast(@alignCast(ptr));
+        var results: std.ArrayList(Binding) = .{};
+
+        for (self.facts.items) |fact| {
+            if (!std.mem.eql(u8, fact.predicate, pattern.predicate)) continue;
+            if (fact.terms.len != pattern.terms.len) continue;
+
+            var binding = Binding.init(alloc);
+            var matched = true;
+
+            for (fact.terms, pattern.terms) |fact_term, pattern_term| {
+                switch (pattern_term) {
+                    .constant => |c| {
+                        switch (fact_term) {
+                            .constant => |fc| {
+                                if (!std.mem.eql(u8, c, fc)) {
+                                    matched = false;
+                                    break;
+                                }
+                            },
+                            .variable => {
+                                matched = false;
+                                break;
+                            },
+                        }
+                    },
+                    .variable => |v| {
+                        const fact_val = switch (fact_term) {
+                            .constant => |c| c,
+                            .variable => {
+                                matched = false;
+                                break;
+                            },
+                        };
+                        if (binding.get(v)) |existing| {
+                            if (!std.mem.eql(u8, existing, fact_val)) {
+                                matched = false;
+                                break;
+                            }
+                        } else {
+                            try binding.put(v, fact_val);
+                        }
+                    },
+                }
+            }
+
+            if (matched) {
+                try results.append(alloc, binding);
+            }
+        }
+
+        return results.toOwnedSlice(alloc);
+    }
+};
+
+// =============================================================================
+// Evaluator (Bottom-up / Naive) - Uses arena for all allocations
+// =============================================================================
+
 pub const Evaluator = struct {
     arena: std.heap.ArenaAllocator,
-    facts: std.ArrayList(Atom),
+    base_facts: ?FactSource,           // External fact source (optional)
+    derived_facts: std.ArrayList(Atom), // Facts derived by rules
     rules: []Rule,
 
+    /// Init with no external fact source (pure in-memory mode)
     pub fn init(backing_allocator: Allocator, rules: []Rule) Evaluator {
         return .{
             .arena = std.heap.ArenaAllocator.init(backing_allocator),
-            .facts = .{},
+            .base_facts = null,
+            .derived_facts = .{},
+            .rules = rules,
+        };
+    }
+
+    /// Init with external fact source (e.g., hypergraph)
+    pub fn initWithSource(backing_allocator: Allocator, rules: []Rule, source: FactSource) Evaluator {
+        return .{
+            .arena = std.heap.ArenaAllocator.init(backing_allocator),
+            .base_facts = source,
+            .derived_facts = .{},
             .rules = rules,
         };
     }
@@ -469,14 +855,29 @@ pub const Evaluator = struct {
         return self.arena.allocator();
     }
 
+    /// Add a fact to derived facts (for initial facts when no base_facts source)
     pub fn addFact(self: *Evaluator, atom: Atom) !void {
-        // Check if already exists
-        for (self.facts.items) |existing| {
+        // Check if already exists in derived
+        for (self.derived_facts.items) |existing| {
             if (existing.eql(atom)) return;
         }
         // Dupe into arena
         const duped = try atom.dupe(self.allocator());
-        try self.facts.append(self.allocator(), duped);
+        try self.derived_facts.append(self.allocator(), duped);
+    }
+
+    /// Check if a fact exists (in derived or base)
+    fn factExists(self: *Evaluator, atom: Atom) !bool {
+        // Check derived facts
+        for (self.derived_facts.items) |existing| {
+            if (existing.eql(atom)) return true;
+        }
+        // Check base facts if we have a source
+        if (self.base_facts) |source| {
+            const matches = try source.matchAtom(atom, self.allocator());
+            return matches.len > 0;
+        }
+        return false;
     }
 
     /// Run fixed-point evaluation until no new facts are derived
@@ -498,19 +899,18 @@ pub const Evaluator = struct {
                 // For each binding, instantiate the head
                 for (bindings) |binding| {
                     const new_fact = try self.substitute(rule.head, binding);
-                    // Check if exists, add if not
+                    // Check if exists in derived (base facts are read-only)
                     var exists = false;
-                    for (self.facts.items) |existing| {
+                    for (self.derived_facts.items) |existing| {
                         if (existing.eql(new_fact)) {
                             exists = true;
                             break;
                         }
                     }
                     if (!exists) {
-                        try self.facts.append(self.allocator(), new_fact);
+                        try self.derived_facts.append(self.allocator(), new_fact);
                         changed = true;
                     }
-                    // No need to free - arena owns it
                 }
             }
         }
@@ -521,11 +921,29 @@ pub const Evaluator = struct {
         return self.matchAtom(pattern);
     }
 
+    /// Match pattern against both derived facts and base facts
     fn matchAtom(self: *Evaluator, pattern: Atom) ![]Binding {
         const alloc = self.allocator();
         var results: std.ArrayList(Binding) = .{};
 
-        for (self.facts.items) |fact| {
+        // Match against derived facts
+        try self.matchAtomAgainstList(pattern, self.derived_facts.items, &results);
+
+        // Match against base facts if we have a source
+        if (self.base_facts) |source| {
+            const base_results = try source.matchAtom(pattern, alloc);
+            for (base_results) |binding| {
+                try results.append(alloc, binding);
+            }
+        }
+
+        return results.toOwnedSlice(alloc);
+    }
+
+    fn matchAtomAgainstList(self: *Evaluator, pattern: Atom, facts: []const Atom, results: *std.ArrayList(Binding)) !void {
+        const alloc = self.allocator();
+
+        for (facts) |fact| {
             if (!std.mem.eql(u8, fact.predicate, pattern.predicate)) continue;
             if (fact.terms.len != pattern.terms.len) continue;
 
@@ -563,7 +981,6 @@ pub const Evaluator = struct {
                                 break;
                             }
                         } else {
-                            // Just store - arena owns everything
                             try binding.put(v, fact_val);
                         }
                     },
@@ -573,10 +990,7 @@ pub const Evaluator = struct {
             if (matched) {
                 try results.append(alloc, binding);
             }
-            // No cleanup needed on mismatch - arena
         }
-
-        return results.toOwnedSlice(alloc);
     }
 
     fn matchBody(self: *Evaluator, body: []Atom) ![]Binding {
@@ -734,6 +1148,29 @@ test "lexer comments" {
     try std.testing.expectEqualStrings("foo", tok.text);
 }
 
+test "lexer @map tokens" {
+    var lexer = Lexer.init("@map foo(A) = [rel:bar, x:A].");
+
+    try std.testing.expectEqual(TokenType.at, lexer.next().type);
+    try std.testing.expectEqual(TokenType.identifier, lexer.next().type); // map
+    try std.testing.expectEqual(TokenType.identifier, lexer.next().type); // foo
+    try std.testing.expectEqual(TokenType.lparen, lexer.next().type);
+    try std.testing.expectEqual(TokenType.identifier, lexer.next().type); // A
+    try std.testing.expectEqual(TokenType.rparen, lexer.next().type);
+    try std.testing.expectEqual(TokenType.equals, lexer.next().type);
+    try std.testing.expectEqual(TokenType.lbracket, lexer.next().type);
+    try std.testing.expectEqual(TokenType.identifier, lexer.next().type); // rel
+    try std.testing.expectEqual(TokenType.colon, lexer.next().type);
+    try std.testing.expectEqual(TokenType.identifier, lexer.next().type); // bar
+    try std.testing.expectEqual(TokenType.comma, lexer.next().type);
+    try std.testing.expectEqual(TokenType.identifier, lexer.next().type); // x
+    try std.testing.expectEqual(TokenType.colon, lexer.next().type);
+    try std.testing.expectEqual(TokenType.identifier, lexer.next().type); // A
+    try std.testing.expectEqual(TokenType.rbracket, lexer.next().type);
+    try std.testing.expectEqual(TokenType.dot, lexer.next().type);
+    try std.testing.expectEqual(TokenType.eof, lexer.next().type);
+}
+
 test "parser simple fact" {
     const allocator = std.testing.allocator;
     var parser = Parser.init(allocator, "parent(tom, bob).");
@@ -743,6 +1180,8 @@ test "parser simple fact" {
         for (result.rules) |r| r.free(allocator);
         allocator.free(result.rules);
         allocator.free(result.queries);
+        for (result.mappings) |m| m.free(allocator);
+        allocator.free(result.mappings);
     }
 
     try std.testing.expectEqual(@as(usize, 1), result.rules.len);
@@ -760,6 +1199,8 @@ test "parser rule with body" {
         for (result.rules) |r| r.free(allocator);
         allocator.free(result.rules);
         allocator.free(result.queries);
+        for (result.mappings) |m| m.free(allocator);
+        allocator.free(result.mappings);
     }
 
     try std.testing.expectEqual(@as(usize, 1), result.rules.len);
@@ -782,6 +1223,8 @@ test "parser query" {
         }
         allocator.free(result.rules);
         allocator.free(result.queries);
+        for (result.mappings) |m| m.free(allocator);
+        allocator.free(result.mappings);
     }
 
     try std.testing.expectEqual(@as(usize, 0), result.rules.len);
@@ -802,6 +1245,8 @@ test "evaluator simple query" {
         for (result.rules) |r| r.free(allocator);
         allocator.free(result.rules);
         allocator.free(result.queries);
+        for (result.mappings) |m| m.free(allocator);
+        allocator.free(result.mappings);
     }
 
     var eval = Evaluator.init(allocator, result.rules);
@@ -844,6 +1289,8 @@ test "evaluator transitive closure" {
         for (result.rules) |r| r.free(allocator);
         allocator.free(result.rules);
         allocator.free(result.queries);
+        for (result.mappings) |m| m.free(allocator);
+        allocator.free(result.mappings);
     }
 
     var eval = Evaluator.init(allocator, result.rules);
@@ -889,6 +1336,8 @@ test "evaluator member_of transitive" {
         for (result.rules) |r| r.free(allocator);
         allocator.free(result.rules);
         allocator.free(result.queries);
+        for (result.mappings) |m| m.free(allocator);
+        allocator.free(result.mappings);
     }
 
     var eval = Evaluator.init(allocator, result.rules);
@@ -957,6 +1406,8 @@ test "books and literary influence" {
         for (result.rules) |r| r.free(allocator);
         allocator.free(result.rules);
         allocator.free(result.queries);
+        for (result.mappings) |m| m.free(allocator);
+        allocator.free(result.mappings);
     }
 
     var eval = Evaluator.init(allocator, result.rules);
@@ -997,4 +1448,78 @@ test "books and literary influence" {
 
     // Virgil -> Milton, Dante -> Milton, Homer -> Virgil -> Milton
     try std.testing.expectEqual(@as(usize, 3), q3.len);
+}
+
+test "parser @map directive" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator,
+        \\% Map Datalog predicates to hypergraph patterns
+        \\@map influenced(A, B) = [rel:influenced, author:A, author:B].
+        \\@map wrote(Author, Book) = [rel:wrote, author:Author, book:Book].
+        \\
+        \\% Rules using the mapped predicates
+        \\influenced_t(A, B) :- influenced(A, B).
+    );
+
+    const result = try parser.parseProgram();
+    defer {
+        for (result.rules) |r| r.free(allocator);
+        allocator.free(result.rules);
+        allocator.free(result.queries);
+        for (result.mappings) |m| m.free(allocator);
+        allocator.free(result.mappings);
+    }
+
+    // Should have 2 mappings and 1 rule
+    try std.testing.expectEqual(@as(usize, 2), result.mappings.len);
+    try std.testing.expectEqual(@as(usize, 1), result.rules.len);
+
+    // Check first mapping: influenced(A, B) = [rel:influenced, author:A, author:B]
+    const m1 = result.mappings[0];
+    try std.testing.expectEqualStrings("influenced", m1.predicate);
+    try std.testing.expectEqual(@as(usize, 2), m1.args.len);
+    try std.testing.expectEqualStrings("A", m1.args[0]);
+    try std.testing.expectEqualStrings("B", m1.args[1]);
+    try std.testing.expectEqual(@as(usize, 3), m1.pattern.len);
+
+    // Check pattern elements
+    try std.testing.expectEqualStrings("rel", m1.pattern[0].entity_type);
+    try std.testing.expectEqualStrings("influenced", m1.pattern[0].value.constant);
+
+    try std.testing.expectEqualStrings("author", m1.pattern[1].entity_type);
+    try std.testing.expectEqualStrings("A", m1.pattern[1].value.variable);
+
+    try std.testing.expectEqualStrings("author", m1.pattern[2].entity_type);
+    try std.testing.expectEqualStrings("B", m1.pattern[2].value.variable);
+
+    // Check second mapping
+    const m2 = result.mappings[1];
+    try std.testing.expectEqualStrings("wrote", m2.predicate);
+    try std.testing.expectEqual(@as(usize, 2), m2.args.len);
+}
+
+test "parser error formatting" {
+    const allocator = std.testing.allocator;
+
+    // Invalid syntax - missing closing paren
+    var parser = Parser.init(allocator,
+        \\foo(X, Y.
+        \\bar(Z).
+    );
+
+    const result = parser.parseProgram();
+    try std.testing.expectError(error.ExpectedRParen, result);
+
+    // Check error info
+    const err_info = parser.getLastError().?;
+    try std.testing.expectEqual(@as(usize, 1), err_info.line);
+    try std.testing.expectEqualStrings("expected ')'", err_info.msg);
+
+    // Print the formatted error to a buffer
+    std.debug.print("\n--- Error formatting demo ---\n", .{});
+    var buf: [512]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try parser.formatError(fbs.writer());
+    std.debug.print("{s}", .{fbs.getWritten()});
+    std.debug.print("-----------------------------\n", .{});
 }
