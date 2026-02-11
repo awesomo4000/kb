@@ -6,9 +6,15 @@ const Entity = @import("fact.zig").Entity;
 
 /// Adapts hypergraph FactStore to Datalog's FactSource interface.
 /// Uses @map directives to translate predicate queries into hypergraph lookups.
+/// Includes query result caching for performance.
 pub const HypergraphFactSource = struct {
     store: *FactStore,
     mappings: []const datalog.Mapping,
+    // Cache: pattern key -> cached results
+    cache: std.StringHashMapUnmanaged([]datalog.Binding),
+    cache_arena: std.heap.ArenaAllocator,
+    cache_hits: u64 = 0,
+    cache_misses: u64 = 0,
 
     const Self = @This();
 
@@ -16,7 +22,13 @@ pub const HypergraphFactSource = struct {
         return .{
             .store = store,
             .mappings = mappings,
+            .cache = .{},
+            .cache_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
         };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.cache_arena.deinit();
     }
 
     /// Get the FactSource interface for use with Evaluator
@@ -27,6 +39,19 @@ pub const HypergraphFactSource = struct {
         };
     }
 
+    /// Print cache statistics
+    pub fn printCacheStats(self: *Self) void {
+        const total = self.cache_hits + self.cache_misses;
+        if (total > 0) {
+            const hit_rate = @as(f64, @floatFromInt(self.cache_hits)) / @as(f64, @floatFromInt(total)) * 100.0;
+            std.debug.print("\nHypergraph cache: {} hits, {} misses ({d:.1}% hit rate)\n", .{
+                self.cache_hits,
+                self.cache_misses,
+                hit_rate,
+            });
+        }
+    }
+
     fn matchAtomImpl(ptr: *anyopaque, pattern: datalog.Atom, alloc: Allocator) Allocator.Error![]datalog.Binding {
         const self: *Self = @ptrCast(@alignCast(ptr));
         return self.matchAtom(pattern, alloc) catch |err| {
@@ -35,8 +60,44 @@ pub const HypergraphFactSource = struct {
         };
     }
 
+    /// Build a cache key from an atom pattern
+    fn buildCacheKey(self: *Self, pattern: datalog.Atom) ![]const u8 {
+        const cache_alloc = self.cache_arena.allocator();
+        var key_parts: std.ArrayList(u8) = .{};
+
+        try key_parts.appendSlice(cache_alloc, pattern.predicate);
+        try key_parts.append(cache_alloc, '(');
+        for (pattern.terms, 0..) |term, i| {
+            if (i > 0) try key_parts.append(cache_alloc, ',');
+            switch (term) {
+                .constant => |c| {
+                    try key_parts.append(cache_alloc, 'c');
+                    try key_parts.append(cache_alloc, ':');
+                    try key_parts.appendSlice(cache_alloc, c);
+                },
+                .variable => |v| {
+                    try key_parts.append(cache_alloc, 'v');
+                    try key_parts.append(cache_alloc, ':');
+                    try key_parts.appendSlice(cache_alloc, v);
+                },
+            }
+        }
+        try key_parts.append(cache_alloc, ')');
+        return key_parts.toOwnedSlice(cache_alloc);
+    }
+
     /// Match a Datalog atom pattern against hypergraph facts
     pub fn matchAtom(self: *Self, pattern: datalog.Atom, alloc: Allocator) ![]datalog.Binding {
+        const cache_alloc = self.cache_arena.allocator();
+
+        // Build cache key and check cache
+        const cache_key = try self.buildCacheKey(pattern);
+        if (self.cache.get(cache_key)) |cached| {
+            self.cache_hits += 1;
+            return cached;
+        }
+        self.cache_misses += 1;
+
         // Find mapping for this predicate
         const mapping = self.findMapping(pattern.predicate) orelse {
             // No mapping -> no results from hypergraph
@@ -99,7 +160,22 @@ pub const HypergraphFactSource = struct {
             }
         }
 
-        return results.toOwnedSlice(alloc);
+        const final_results = try results.toOwnedSlice(alloc);
+
+        // Cache the results (copy to cache arena for persistence)
+        const cached_results = try cache_alloc.alloc(datalog.Binding, final_results.len);
+        for (final_results, 0..) |binding, i| {
+            cached_results[i] = datalog.Binding.init(cache_alloc);
+            var iter = binding.iterator();
+            while (iter.next()) |entry| {
+                const key = try cache_alloc.dupe(u8, entry.key_ptr.*);
+                const val = try cache_alloc.dupe(u8, entry.value_ptr.*);
+                try cached_results[i].put(key, val);
+            }
+        }
+        try self.cache.put(cache_alloc, cache_key, cached_results);
+
+        return final_results;
     }
 
     /// Match a hypergraph fact against the Datalog pattern using the mapping

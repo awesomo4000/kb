@@ -493,7 +493,24 @@ fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const HypergraphFactSource = kb.HypergraphFactSource;
 
     if (args.len == 0) {
-        std.debug.print("Usage: kb datalog <rules.dl>\n", .{});
+        std.debug.print("Usage: kb datalog [--profile] <rules.dl>\n", .{});
+        return;
+    }
+
+    // Parse flags
+    var profile_enabled = false;
+    var file_idx: usize = 0;
+    for (args, 0..) |arg, i| {
+        if (std.mem.eql(u8, arg, "--profile")) {
+            profile_enabled = true;
+        } else {
+            file_idx = i;
+            break;
+        }
+    }
+
+    if (file_idx >= args.len) {
+        std.debug.print("Usage: kb datalog [--profile] <rules.dl>\n", .{});
         return;
     }
 
@@ -519,7 +536,7 @@ fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var accumulated = AccumulatedParse.init(allocator);
     defer accumulated.deinit();
 
-    parseDatalogWithIncludes(allocator, args[0], &visited, &accumulated) catch |err| {
+    parseDatalogWithIncludes(allocator, args[file_idx], &visited, &accumulated) catch |err| {
         std.debug.print("Failed to parse: {}\n", .{err});
         return;
     };
@@ -532,10 +549,16 @@ fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Create hypergraph fact source
     var hg_source = HypergraphFactSource.init(&store, accumulated.mappings.items);
+    defer hg_source.deinit();
 
     // Create evaluator
     var eval = datalog.Evaluator.initWithSource(allocator, accumulated.rules.items, hg_source.source());
     defer eval.deinit();
+
+    // Enable profiling if requested
+    if (profile_enabled) {
+        try eval.enableProfiling();
+    }
 
     // Add any ground facts from rules (facts with empty body)
     for (accumulated.rules.items) |rule| {
@@ -548,6 +571,12 @@ fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var timer = try std.time.Timer.start();
     try eval.evaluate();
     const elapsed_ns = timer.read();
+
+    // Print profile results if enabled
+    if (profile_enabled) {
+        eval.printProfile();
+        hg_source.printCacheStats();
+    }
 
     std.debug.print("Evaluation complete: {} derived facts in {d:.3}ms\n", .{
         eval.derived_facts.items.len,

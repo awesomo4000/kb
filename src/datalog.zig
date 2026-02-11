@@ -846,12 +846,23 @@ pub const MemoryFactSource = struct {
 // Evaluator (Bottom-up / Naive) - Uses arena for all allocations
 // =============================================================================
 
+/// Per-rule profiling stats
+pub const RuleProfile = struct {
+    predicate: []const u8,
+    total_time_ns: u64 = 0,
+    bindings_generated: u64 = 0,
+    facts_derived: u64 = 0,
+    iterations: u64 = 0,
+};
+
 pub const Evaluator = struct {
     arena: std.heap.ArenaAllocator,
     base_facts: ?FactSource,           // External fact source (optional)
     derived_facts: std.ArrayList(Atom), // Facts derived by rules
     by_predicate: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Atom)), // Predicate index
     rules: []Rule,
+    profiling_enabled: bool = false,
+    rule_profiles: ?[]RuleProfile = null,
 
     /// Init with no external fact source (pure in-memory mode)
     pub fn init(backing_allocator: Allocator, rules: []Rule) Evaluator {
@@ -873,6 +884,44 @@ pub const Evaluator = struct {
             .by_predicate = .{},
             .rules = rules,
         };
+    }
+
+    /// Enable profiling and allocate profile storage
+    pub fn enableProfiling(self: *Evaluator) !void {
+        self.profiling_enabled = true;
+        const profiles = try self.allocator().alloc(RuleProfile, self.rules.len);
+        for (profiles, self.rules) |*p, rule| {
+            p.* = .{ .predicate = rule.head.predicate };
+        }
+        self.rule_profiles = profiles;
+    }
+
+    /// Print profiling results sorted by time
+    pub fn printProfile(self: *Evaluator) void {
+        const profiles = self.rule_profiles orelse return;
+
+        // Sort by total time descending
+        std.mem.sort(RuleProfile, profiles, {}, struct {
+            fn cmp(_: void, a: RuleProfile, b: RuleProfile) bool {
+                return a.total_time_ns > b.total_time_ns;
+            }
+        }.cmp);
+
+        std.debug.print("\n=== Rule Profile (sorted by time) ===\n", .{});
+        std.debug.print("{s:<40} {s:>12} {s:>12} {s:>10} {s:>8}\n", .{ "Predicate", "Time (ms)", "Bindings", "Facts", "Iters" });
+        std.debug.print("{s:-<40} {s:->12} {s:->12} {s:->10} {s:->8}\n", .{ "", "", "", "", "" });
+
+        for (profiles) |p| {
+            if (p.total_time_ns == 0) continue;
+            const time_ms = @as(f64, @floatFromInt(p.total_time_ns)) / 1_000_000.0;
+            std.debug.print("{s:<40} {d:>12.2} {d:>12} {d:>10} {d:>8}\n", .{
+                p.predicate,
+                time_ms,
+                p.bindings_generated,
+                p.facts_derived,
+                p.iterations,
+            });
+        }
     }
 
     pub fn deinit(self: *Evaluator) void {
@@ -937,12 +986,15 @@ pub const Evaluator = struct {
             changed = false;
             iteration += 1;
 
-            for (self.rules) |rule| {
+            for (self.rules, 0..) |rule, rule_idx| {
                 if (rule.body.len == 0) continue; // Skip facts
+
+                const start_time = if (self.profiling_enabled) std.time.nanoTimestamp() else 0;
 
                 // Find all bindings that satisfy the body
                 const bindings = try self.matchBody(rule.body);
 
+                var facts_this_rule: u64 = 0;
                 // For each binding, instantiate the head
                 for (bindings) |binding| {
                     const new_fact = try self.substitute(rule.head, binding);
@@ -951,6 +1003,18 @@ pub const Evaluator = struct {
                         try self.derived_facts.append(self.allocator(), new_fact);
                         try self.indexFact(new_fact);
                         changed = true;
+                        facts_this_rule += 1;
+                    }
+                }
+
+                // Update profile stats
+                if (self.profiling_enabled) {
+                    if (self.rule_profiles) |profiles| {
+                        const elapsed = @as(u64, @intCast(std.time.nanoTimestamp() - start_time));
+                        profiles[rule_idx].total_time_ns += elapsed;
+                        profiles[rule_idx].bindings_generated += bindings.len;
+                        profiles[rule_idx].facts_derived += facts_this_rule;
+                        profiles[rule_idx].iterations += 1;
                     }
                 }
             }
