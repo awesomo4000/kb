@@ -2,6 +2,8 @@ const std = @import("std");
 const kb = @import("kb");
 const FactStore = kb.FactStore;
 const Entity = kb.Entity;
+const datalog = kb.datalog;
+const HypergraphFactSource = kb.HypergraphFactSource;
 
 fn getTempPath(allocator: std.mem.Allocator) ![:0]const u8 {
     const random = std.crypto.random.int(u64);

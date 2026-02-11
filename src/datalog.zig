@@ -349,7 +349,7 @@ pub const ParseError = error{
 pub const Parser = struct {
     lexer: Lexer,
     current: Token,
-    allocator: Allocator,
+    arena: std.heap.ArenaAllocator,
     source: []const u8,
 
     // Error context - populated when parse fails
@@ -357,15 +357,25 @@ pub const Parser = struct {
     error_col: usize = 0,
     error_msg: []const u8 = "",
 
-    pub fn init(allocator: Allocator, source: []const u8) Parser {
+    pub fn init(backing_allocator: Allocator, source: []const u8) Parser {
         var lexer = Lexer.init(source);
         const first_token = lexer.next();
         return .{
             .lexer = lexer,
             .current = first_token,
-            .allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(backing_allocator),
             .source = source,
         };
+    }
+
+    /// Free all memory allocated during parsing.
+    /// ParseResult is invalid after this call.
+    pub fn deinit(self: *Parser) void {
+        self.arena.deinit();
+    }
+
+    fn allocator(self: *Parser) Allocator {
+        return self.arena.allocator();
     }
 
     /// Get a nice error message with source context
@@ -443,7 +453,7 @@ pub const Parser = struct {
                 if (std.mem.eql(u8, self.current.text, "map")) {
                     self.advance();
                     const mapping = try self.parseMapping();
-                    try mappings.append(self.allocator, mapping);
+                    try mappings.append(self.allocator(), mapping);
                 } else {
                     self.setError("unknown directive (expected 'map')");
                     return error.UnexpectedToken;
@@ -453,18 +463,18 @@ pub const Parser = struct {
                 self.advance();
                 const body = try self.parseBody();
                 try self.expect(.dot);
-                try queries.append(self.allocator, body);
+                try queries.append(self.allocator(), body);
             } else {
                 // Fact or rule
                 const rule = try self.parseRule();
-                try rules.append(self.allocator, rule);
+                try rules.append(self.allocator(), rule);
             }
         }
 
         return .{
-            .rules = try rules.toOwnedSlice(self.allocator),
-            .queries = try queries.toOwnedSlice(self.allocator),
-            .mappings = try mappings.toOwnedSlice(self.allocator),
+            .rules = try rules.toOwnedSlice(self.allocator()),
+            .queries = try queries.toOwnedSlice(self.allocator()),
+            .mappings = try mappings.toOwnedSlice(self.allocator()),
         };
     }
 
@@ -492,15 +502,15 @@ pub const Parser = struct {
         var atoms: std.ArrayList(Atom) = .{};
 
         const first = try self.parseAtom();
-        try atoms.append(self.allocator, first);
+        try atoms.append(self.allocator(), first);
 
         while (self.current.type == .comma) {
             self.advance();
             const atom = try self.parseAtom();
-            try atoms.append(self.allocator, atom);
+            try atoms.append(self.allocator(), atom);
         }
 
-        return atoms.toOwnedSlice(self.allocator);
+        return atoms.toOwnedSlice(self.allocator());
     }
 
     fn parseAtom(self: *Parser) ParseError!Atom {
@@ -509,7 +519,7 @@ pub const Parser = struct {
             return error.ExpectedIdentifier;
         }
 
-        const predicate = try self.allocator.dupe(u8, self.current.text);
+        const predicate = try self.allocator().dupe(u8, self.current.text);
         self.advance();
 
         try self.expect(.lparen);
@@ -518,12 +528,12 @@ pub const Parser = struct {
 
         if (self.current.type != .rparen) {
             const first = try self.parseTerm();
-            try terms.append(self.allocator, first);
+            try terms.append(self.allocator(), first);
 
             while (self.current.type == .comma) {
                 self.advance();
                 const term = try self.parseTerm();
-                try terms.append(self.allocator, term);
+                try terms.append(self.allocator(), term);
             }
         }
 
@@ -531,19 +541,19 @@ pub const Parser = struct {
 
         return .{
             .predicate = predicate,
-            .terms = try terms.toOwnedSlice(self.allocator),
+            .terms = try terms.toOwnedSlice(self.allocator()),
         };
     }
 
     fn parseTerm(self: *Parser) ParseError!Term {
         if (self.current.type == .string) {
-            const text = try self.allocator.dupe(u8, self.current.text);
+            const text = try self.allocator().dupe(u8, self.current.text);
             self.advance();
             return .{ .constant = text };
         }
 
         if (self.current.type == .identifier) {
-            const text = try self.allocator.dupe(u8, self.current.text);
+            const text = try self.allocator().dupe(u8, self.current.text);
             self.advance();
 
             // Variables start with uppercase
@@ -565,7 +575,7 @@ pub const Parser = struct {
             self.setError("expected predicate name in @map");
             return error.ExpectedIdentifier;
         }
-        const predicate = try self.allocator.dupe(u8, self.current.text);
+        const predicate = try self.allocator().dupe(u8, self.current.text);
         self.advance();
 
         // Parse argument list
@@ -578,7 +588,7 @@ pub const Parser = struct {
                 self.setError("expected argument name in @map");
                 return error.ExpectedIdentifier;
             }
-            try args.append(self.allocator, try self.allocator.dupe(u8, self.current.text));
+            try args.append(self.allocator(), try self.allocator().dupe(u8, self.current.text));
             self.advance();
 
             // Additional arguments
@@ -588,7 +598,7 @@ pub const Parser = struct {
                     self.setError("expected argument name after ','");
                     return error.ExpectedIdentifier;
                 }
-                try args.append(self.allocator, try self.allocator.dupe(u8, self.current.text));
+                try args.append(self.allocator(), try self.allocator().dupe(u8, self.current.text));
                 self.advance();
             }
         }
@@ -613,13 +623,13 @@ pub const Parser = struct {
         if (self.current.type != .rbracket) {
             // First element
             const elem = try self.parsePatternElement();
-            try pattern.append(self.allocator, elem);
+            try pattern.append(self.allocator(), elem);
 
             // Additional elements
             while (self.current.type == .comma) {
                 self.advance();
                 const next_elem = try self.parsePatternElement();
-                try pattern.append(self.allocator, next_elem);
+                try pattern.append(self.allocator(), next_elem);
             }
         }
 
@@ -634,8 +644,8 @@ pub const Parser = struct {
 
         return .{
             .predicate = predicate,
-            .args = try args.toOwnedSlice(self.allocator),
-            .pattern = try pattern.toOwnedSlice(self.allocator),
+            .args = try args.toOwnedSlice(self.allocator()),
+            .pattern = try pattern.toOwnedSlice(self.allocator()),
         };
     }
 
@@ -646,7 +656,7 @@ pub const Parser = struct {
             self.setError("expected entity type in pattern");
             return error.ExpectedIdentifier;
         }
-        const entity_type = try self.allocator.dupe(u8, self.current.text);
+        const entity_type = try self.allocator().dupe(u8, self.current.text);
         self.advance();
 
         // Colon separator
@@ -659,7 +669,7 @@ pub const Parser = struct {
         // Value: either identifier or string
         if (self.current.type == .string) {
             // Quoted string -> constant
-            const val = try self.allocator.dupe(u8, self.current.text);
+            const val = try self.allocator().dupe(u8, self.current.text);
             self.advance();
             return .{
                 .entity_type = entity_type,
@@ -667,7 +677,7 @@ pub const Parser = struct {
             };
         } else if (self.current.type == .identifier) {
             const text = self.current.text;
-            const duped = try self.allocator.dupe(u8, text);
+            const duped = try self.allocator().dupe(u8, text);
             self.advance();
 
             // Uppercase -> variable reference, lowercase -> constant
@@ -1174,15 +1184,9 @@ test "lexer @map tokens" {
 test "parser simple fact" {
     const allocator = std.testing.allocator;
     var parser = Parser.init(allocator, "parent(tom, bob).");
+    defer parser.deinit();
 
     const result = try parser.parseProgram();
-    defer {
-        for (result.rules) |r| r.free(allocator);
-        allocator.free(result.rules);
-        allocator.free(result.queries);
-        for (result.mappings) |m| m.free(allocator);
-        allocator.free(result.mappings);
-    }
 
     try std.testing.expectEqual(@as(usize, 1), result.rules.len);
     try std.testing.expectEqualStrings("parent", result.rules[0].head.predicate);
@@ -1193,15 +1197,9 @@ test "parser simple fact" {
 test "parser rule with body" {
     const allocator = std.testing.allocator;
     var parser = Parser.init(allocator, "grandparent(X, Z) :- parent(X, Y), parent(Y, Z).");
+    defer parser.deinit();
 
     const result = try parser.parseProgram();
-    defer {
-        for (result.rules) |r| r.free(allocator);
-        allocator.free(result.rules);
-        allocator.free(result.queries);
-        for (result.mappings) |m| m.free(allocator);
-        allocator.free(result.mappings);
-    }
 
     try std.testing.expectEqual(@as(usize, 1), result.rules.len);
     const rule = result.rules[0];
@@ -1214,18 +1212,9 @@ test "parser rule with body" {
 test "parser query" {
     const allocator = std.testing.allocator;
     var parser = Parser.init(allocator, "?- foo(X).");
+    defer parser.deinit();
 
     const result = try parser.parseProgram();
-    defer {
-        for (result.queries) |q| {
-            for (q) |a| a.free(allocator);
-            allocator.free(q);
-        }
-        allocator.free(result.rules);
-        allocator.free(result.queries);
-        for (result.mappings) |m| m.free(allocator);
-        allocator.free(result.mappings);
-    }
 
     try std.testing.expectEqual(@as(usize, 0), result.rules.len);
     try std.testing.expectEqual(@as(usize, 1), result.queries.len);
@@ -1239,15 +1228,9 @@ test "evaluator simple query" {
         \\parent("tom", "bob").
         \\parent("bob", "jim").
     );
+    defer parser.deinit();
 
     const result = try parser.parseProgram();
-    defer {
-        for (result.rules) |r| r.free(allocator);
-        allocator.free(result.rules);
-        allocator.free(result.queries);
-        for (result.mappings) |m| m.free(allocator);
-        allocator.free(result.mappings);
-    }
 
     var eval = Evaluator.init(allocator, result.rules);
     defer eval.deinit();
@@ -1283,15 +1266,9 @@ test "evaluator transitive closure" {
         \\reachable(X, Y) :- edge(X, Y).
         \\reachable(X, Z) :- edge(X, Y), reachable(Y, Z).
     );
+    defer parser.deinit();
 
     const result = try parser.parseProgram();
-    defer {
-        for (result.rules) |r| r.free(allocator);
-        allocator.free(result.rules);
-        allocator.free(result.queries);
-        for (result.mappings) |m| m.free(allocator);
-        allocator.free(result.mappings);
-    }
 
     var eval = Evaluator.init(allocator, result.rules);
     defer eval.deinit();
@@ -1330,15 +1307,9 @@ test "evaluator member_of transitive" {
         \\member_of_t(X, G) :- member_of(X, G).
         \\member_of_t(X, G) :- member_of(X, M), member_of_t(M, G).
     );
+    defer parser.deinit();
 
     const result = try parser.parseProgram();
-    defer {
-        for (result.rules) |r| r.free(allocator);
-        allocator.free(result.rules);
-        allocator.free(result.queries);
-        for (result.mappings) |m| m.free(allocator);
-        allocator.free(result.mappings);
-    }
 
     var eval = Evaluator.init(allocator, result.rules);
     defer eval.deinit();
@@ -1400,15 +1371,9 @@ test "books and literary influence" {
         \\books_in_tradition(Book, Root) :-
         \\    influenced_t(Root, Author), wrote(Author, Book).
     );
+    defer parser.deinit();
 
     const result = try parser.parseProgram();
-    defer {
-        for (result.rules) |r| r.free(allocator);
-        allocator.free(result.rules);
-        allocator.free(result.queries);
-        for (result.mappings) |m| m.free(allocator);
-        allocator.free(result.mappings);
-    }
 
     var eval = Evaluator.init(allocator, result.rules);
     defer eval.deinit();
@@ -1460,15 +1425,9 @@ test "parser @map directive" {
         \\% Rules using the mapped predicates
         \\influenced_t(A, B) :- influenced(A, B).
     );
+    defer parser.deinit();
 
     const result = try parser.parseProgram();
-    defer {
-        for (result.rules) |r| r.free(allocator);
-        allocator.free(result.rules);
-        allocator.free(result.queries);
-        for (result.mappings) |m| m.free(allocator);
-        allocator.free(result.mappings);
-    }
 
     // Should have 2 mappings and 1 rule
     try std.testing.expectEqual(@as(usize, 2), result.mappings.len);
@@ -1506,6 +1465,7 @@ test "parser error formatting" {
         \\foo(X, Y.
         \\bar(Z).
     );
+    defer parser.deinit(); // Arena cleans up partial allocations on error
 
     const result = parser.parseProgram();
     try std.testing.expectError(error.ExpectedRParen, result);
