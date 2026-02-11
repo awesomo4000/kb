@@ -211,7 +211,7 @@ test "datalog with hypergraph source" {
     const parsed = try parser.parseProgram();
 
     // Create hypergraph fact source with mappings
-    var hg_source = HypergraphFactSource.init(&store, parsed.mappings, allocator);
+    var hg_source = HypergraphFactSource.init(&store, parsed.mappings);
 
     // Create evaluator with hypergraph as base facts
     var eval = datalog.Evaluator.initWithSource(allocator, parsed.rules, hg_source.source());

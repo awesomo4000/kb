@@ -9,15 +9,13 @@ const Entity = @import("fact.zig").Entity;
 pub const HypergraphFactSource = struct {
     store: *FactStore,
     mappings: []const datalog.Mapping,
-    alloc: Allocator,
 
     const Self = @This();
 
-    pub fn init(store: *FactStore, mappings: []const datalog.Mapping, alloc: Allocator) Self {
+    pub fn init(store: *FactStore, mappings: []const datalog.Mapping) Self {
         return .{
             .store = store,
             .mappings = mappings,
-            .alloc = alloc,
         };
     }
 
