@@ -58,8 +58,8 @@ influenced_by(A, C) :- wrote(A, B), references(B, C).
 
 ```json
 {
-  "edges": [["type", "id"], ["type", "id"], ...],
-  "source": "tool_name"
+  "edges": [["author", "Virgil"], ["author", "Homer"], ["rel", "influenced"]],
+  "source": "library"
 }
 ```
 
@@ -75,38 +75,38 @@ Datalog is a declarative query language where you define **rules** that derive n
 
 **Facts** are things you know:
 ```prolog
-parent("alice", "bob").    % alice is bob's parent
-parent("bob", "charlie").  % bob is charlie's parent
+influenced("Virgil", "Homer").   % Virgil was influenced by Homer
+influenced("Dante", "Virgil").   % Dante was influenced by Virgil
 ```
 
 **Rules** derive new facts:
 ```prolog
-grandparent(X, Z) :- parent(X, Y), parent(Y, Z).
+influenced_by(A, C) :- influenced(A, B), influenced(B, C).
 ```
 
-This reads: "X is grandparent of Z **if** X is parent of Y **and** Y is parent of Z."
+This reads: "A is influenced by C **if** A is influenced by B **and** B is influenced by C."
 
 **Evaluation** repeatedly applies rules until no new facts are derived:
 ```
-Start:    parent(alice,bob), parent(bob,charlie)
-Apply:    grandparent(alice,charlie)  ← new fact derived!
+Start:    influenced(Virgil,Homer), influenced(Dante,Virgil)
+Apply:    influenced_by(Dante,Homer)  ← new fact derived!
 Apply:    (no more new facts)
 Done.
 ```
 
 **Queries** ask what's true:
 ```prolog
-?- grandparent(X, "charlie").   % Who are charlie's grandparents?
-   X = alice
+?- influenced_by(X, "Homer").   % Who was influenced by Homer?
+   X = Dante
 ```
 
 The power is in **recursive rules** — finding transitive relationships:
 ```prolog
-ancestor(X, Y) :- parent(X, Y).
-ancestor(X, Z) :- parent(X, Y), ancestor(Y, Z).
+tradition(X, Y) :- influenced(X, Y).
+tradition(X, Z) :- influenced(X, Y), tradition(Y, Z).
 ```
 
-This finds all ancestors, no matter how many generations back. The engine keeps applying rules until it reaches a fixpoint (no new facts). You describe *what* you want, not *how* to compute it.
+This finds all authors in a literary tradition, no matter how many generations back. The engine keeps applying rules until it reaches a fixpoint (no new facts). You describe *what* you want, not *how* to compute it.
 
 ## License
 
