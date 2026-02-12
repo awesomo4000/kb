@@ -1,7 +1,7 @@
 .{
     .name = .kb,
     .version = "0.0.1",
-    .fingerprint = 0x1fca0d072a377a33,
+    .fingerprint = 0x646ca0e7c215d726,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .lmdb = .{
