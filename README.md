@@ -69,6 +69,45 @@ Each fact connects multiple typed entities. The hypergraph indexes by entity for
 
 Uses LMDB for memory-mapped, concurrent-read storage. Data persists in `.kb/` directory.
 
+## How Datalog Works
+
+Datalog is a declarative query language where you define **rules** that derive new facts from existing ones.
+
+**Facts** are things you know:
+```datalog
+parent("alice", "bob").    % alice is bob's parent
+parent("bob", "charlie").  % bob is charlie's parent
+```
+
+**Rules** derive new facts:
+```datalog
+grandparent(X, Z) :- parent(X, Y), parent(Y, Z).
+```
+
+This reads: "X is grandparent of Z **if** X is parent of Y **and** Y is parent of Z."
+
+**Evaluation** repeatedly applies rules until no new facts are derived:
+```
+Start:    parent(alice,bob), parent(bob,charlie)
+Apply:    grandparent(alice,charlie)  ← new fact derived!
+Apply:    (no more new facts)
+Done.
+```
+
+**Queries** ask what's true:
+```datalog
+?- grandparent(X, "charlie").   % Who are charlie's grandparents?
+   X = alice
+```
+
+The power is in **recursive rules** — finding transitive relationships:
+```datalog
+ancestor(X, Y) :- parent(X, Y).
+ancestor(X, Z) :- parent(X, Y), ancestor(Y, Z).
+```
+
+This finds all ancestors, no matter how many generations back. The engine keeps applying rules until it reaches a fixpoint (no new facts). You describe *what* you want, not *how* to compute it.
+
 ## License
 
 MIT
