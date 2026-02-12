@@ -10,18 +10,27 @@ const Entity = @import("fact.zig").Entity;
 pub const HypergraphFactSource = struct {
     store: *FactStore,
     mappings: []const datalog.Mapping,
-    // Cache: pattern key -> cached results
-    cache: std.StringHashMapUnmanaged([]datalog.Binding),
+    // O(1) check for whether a predicate has a mapping
+    mapped_predicates: std.StringHashMapUnmanaged(void),
+    // Cache: atom hash -> cached results (using hash as key for speed)
+    cache: std.AutoHashMapUnmanaged(u64, []datalog.Binding),
     cache_arena: std.heap.ArenaAllocator,
     cache_hits: u64 = 0,
     cache_misses: u64 = 0,
+    unmapped_skips: u64 = 0,
 
     const Self = @This();
 
     pub fn init(store: *FactStore, mappings: []const datalog.Mapping) Self {
+        // Build set of mapped predicates for O(1) lookup
+        var mapped_preds: std.StringHashMapUnmanaged(void) = .{};
+        for (mappings) |m| {
+            mapped_preds.put(std.heap.page_allocator, m.predicate, {}) catch {};
+        }
         return .{
             .store = store,
             .mappings = mappings,
+            .mapped_predicates = mapped_preds,
             .cache = .{},
             .cache_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
         };
@@ -42,12 +51,13 @@ pub const HypergraphFactSource = struct {
     /// Print cache statistics
     pub fn printCacheStats(self: *Self) void {
         const total = self.cache_hits + self.cache_misses;
-        if (total > 0) {
-            const hit_rate = @as(f64, @floatFromInt(self.cache_hits)) / @as(f64, @floatFromInt(total)) * 100.0;
-            std.debug.print("\nHypergraph cache: {} hits, {} misses ({d:.1}% hit rate)\n", .{
+        if (total > 0 or self.unmapped_skips > 0) {
+            const hit_rate = if (total > 0) @as(f64, @floatFromInt(self.cache_hits)) / @as(f64, @floatFromInt(total)) * 100.0 else 0;
+            std.debug.print("\nHypergraph: {} hits, {} misses ({d:.1}% hit rate), {} unmapped skips\n", .{
                 self.cache_hits,
                 self.cache_misses,
                 hit_rate,
+                self.unmapped_skips,
             });
         }
     }
@@ -88,10 +98,16 @@ pub const HypergraphFactSource = struct {
 
     /// Match a Datalog atom pattern against hypergraph facts
     pub fn matchAtom(self: *Self, pattern: datalog.Atom, alloc: Allocator) ![]datalog.Binding {
+        // Fast O(1) check: skip unmapped predicates entirely
+        if (!self.mapped_predicates.contains(pattern.predicate)) {
+            self.unmapped_skips += 1;
+            return &[_]datalog.Binding{};
+        }
+
         const cache_alloc = self.cache_arena.allocator();
 
-        // Build cache key and check cache
-        const cache_key = try self.buildCacheKey(pattern);
+        // Use atom hash as cache key (much faster than string building)
+        const cache_key = pattern.hash();
         if (self.cache.get(cache_key)) |cached| {
             self.cache_hits += 1;
             return cached;

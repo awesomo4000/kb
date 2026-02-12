@@ -919,6 +919,38 @@ pub const RuleProfile = struct {
     iterations: u64 = 0,
 };
 
+/// Global timing stats for detailed profiling
+pub const TimingStats = struct {
+    match_body_ns: u64 = 0,
+    match_body_calls: u64 = 0,
+    match_atom_ns: u64 = 0,
+    match_atom_calls: u64 = 0,
+    base_facts_ns: u64 = 0,
+    base_facts_calls: u64 = 0,
+    index_fact_ns: u64 = 0,
+    index_fact_calls: u64 = 0,
+    substitute_ns: u64 = 0,
+    substitute_calls: u64 = 0,
+
+    pub fn print(self: *const TimingStats) void {
+        std.debug.print("\n=== Detailed Timing Breakdown ===\n", .{});
+        std.debug.print("{s:<25} {s:>12} {s:>12} {s:>12}\n", .{ "Operation", "Time (ms)", "Calls", "Avg (µs)" });
+        std.debug.print("{s:-<25} {s:->12} {s:->12} {s:->12}\n", .{ "", "", "", "" });
+
+        self.printRow("matchBody", self.match_body_ns, self.match_body_calls);
+        self.printRow("matchAtom", self.match_atom_ns, self.match_atom_calls);
+        self.printRow("base_facts lookup", self.base_facts_ns, self.base_facts_calls);
+        self.printRow("indexFact", self.index_fact_ns, self.index_fact_calls);
+        self.printRow("substitute", self.substitute_ns, self.substitute_calls);
+    }
+
+    fn printRow(_: *const TimingStats, name: []const u8, ns: u64, calls: u64) void {
+        const ms = @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+        const avg_us = if (calls > 0) @as(f64, @floatFromInt(ns / calls)) / 1000.0 else 0;
+        std.debug.print("{s:<25} {d:>12.2} {d:>12} {d:>12.2}\n", .{ name, ms, calls, avg_us });
+    }
+};
+
 pub const Evaluator = struct {
     arena: std.heap.ArenaAllocator,
     base_facts: ?FactSource,           // External fact source (optional)
@@ -932,6 +964,9 @@ pub const Evaluator = struct {
     rules: []Rule,
     profiling_enabled: bool = false,
     rule_profiles: ?[]RuleProfile = null,
+    timing_stats: TimingStats = .{},
+    // Skip base_facts during semi-naive iterations (optimization)
+    skip_base_facts: bool = false,
 
     /// Init with no external fact source (pure in-memory mode)
     pub fn init(backing_allocator: Allocator, rules: []Rule) Evaluator {
@@ -997,6 +1032,9 @@ pub const Evaluator = struct {
                 p.iterations,
             });
         }
+
+        // Also print detailed timing breakdown
+        self.timing_stats.print();
     }
 
     pub fn deinit(self: *Evaluator) void {
@@ -1020,6 +1058,12 @@ pub const Evaluator = struct {
 
     /// Add a fact to the predicate index and hash set
     fn indexFact(self: *Evaluator, atom: Atom) !void {
+        const start = if (self.profiling_enabled) std.time.nanoTimestamp() else 0;
+        defer if (self.profiling_enabled) {
+            self.timing_stats.index_fact_ns += @intCast(std.time.nanoTimestamp() - start);
+            self.timing_stats.index_fact_calls += 1;
+        };
+
         const alloc = self.allocator();
         // Add to predicate index
         const gop = try self.by_predicate.getOrPut(alloc, atom.predicate);
@@ -1063,6 +1107,37 @@ pub const Evaluator = struct {
             return matches.len > 0;
         }
         return false;
+    }
+
+    /// Preload all base facts from hypergraph into derived_facts for fast in-memory lookups.
+    /// Call this before evaluate() when using hypergraph source.
+    pub fn preloadBaseFacts(self: *Evaluator, mappings: []const Mapping) !void {
+        const alloc = self.allocator();
+        const source = self.base_facts orelse return;
+
+        for (mappings) |mapping| {
+            // Build all-variable pattern for this predicate
+            const terms = try alloc.alloc(Term, mapping.args.len);
+            for (mapping.args, 0..) |arg, i| {
+                terms[i] = .{ .variable = arg };
+            }
+            const pattern = Atom{ .predicate = mapping.predicate, .terms = terms };
+
+            // Query base facts for this predicate
+            const bindings = try source.matchAtom(pattern, alloc);
+
+            // Convert bindings to atoms and add to derived_facts
+            for (bindings) |binding| {
+                const fact = try self.substitute(pattern, binding);
+                if (!self.factExistsInDerived(fact)) {
+                    try self.derived_facts.append(alloc, fact);
+                    try self.indexFact(fact);
+                }
+            }
+        }
+
+        // After preloading, skip base_facts during evaluation
+        self.skip_base_facts = true;
     }
 
     /// Run semi-naive fixed-point evaluation until no new facts are derived.
@@ -1238,6 +1313,12 @@ pub const Evaluator = struct {
 
     /// Match pattern against both derived facts and base facts
     fn matchAtom(self: *Evaluator, pattern: Atom) ![]Binding {
+        const start = if (self.profiling_enabled) std.time.nanoTimestamp() else 0;
+        defer if (self.profiling_enabled) {
+            self.timing_stats.match_atom_ns += @intCast(std.time.nanoTimestamp() - start);
+            self.timing_stats.match_atom_calls += 1;
+        };
+
         const alloc = self.allocator();
         var results: std.ArrayList(Binding) = .{};
 
@@ -1273,9 +1354,15 @@ pub const Evaluator = struct {
             }
         }
 
-        // Match against base facts if we have a source
-        if (self.base_facts) |source| {
+        // Match against base facts if we have a source (skip during semi-naive iterations)
+        if (self.base_facts != null and !self.skip_base_facts) {
+            const source = self.base_facts.?;
+            const base_start = if (self.profiling_enabled) std.time.nanoTimestamp() else 0;
             const base_results = try source.matchAtom(pattern, alloc);
+            if (self.profiling_enabled) {
+                self.timing_stats.base_facts_ns += @intCast(std.time.nanoTimestamp() - base_start);
+                self.timing_stats.base_facts_calls += 1;
+            }
             for (base_results) |binding| {
                 try results.append(alloc, binding);
             }
@@ -1338,6 +1425,12 @@ pub const Evaluator = struct {
     }
 
     fn matchBody(self: *Evaluator, body: []Atom) ![]Binding {
+        const start = if (self.profiling_enabled) std.time.nanoTimestamp() else 0;
+        defer if (self.profiling_enabled) {
+            self.timing_stats.match_body_ns += @intCast(std.time.nanoTimestamp() - start);
+            self.timing_stats.match_body_calls += 1;
+        };
+
         const alloc = self.allocator();
 
         if (body.len == 0) {
@@ -1389,6 +1482,12 @@ pub const Evaluator = struct {
     }
 
     fn substitute(self: *Evaluator, atom: Atom, binding: Binding) !Atom {
+        const start = if (self.profiling_enabled) std.time.nanoTimestamp() else 0;
+        defer if (self.profiling_enabled) {
+            self.timing_stats.substitute_ns += @intCast(std.time.nanoTimestamp() - start);
+            self.timing_stats.substitute_calls += 1;
+        };
+
         const alloc = self.allocator();
         const terms = try alloc.alloc(Term, atom.terms.len);
         for (atom.terms, 0..) |term, i| {

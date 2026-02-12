@@ -567,6 +567,9 @@ fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
+    // Preload all hypergraph facts into derived_facts for fast in-memory lookups
+    try eval.preloadBaseFacts(accumulated.mappings.items);
+
     // Run evaluation
     var timer = try std.time.Timer.start();
     try eval.evaluate();
