@@ -57,6 +57,27 @@ pub const Atom = struct {
         return true;
     }
 
+    /// Hash function for use in hash sets/maps
+    pub fn hash(self: Atom) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(self.predicate);
+        h.update(&[_]u8{0}); // separator
+        for (self.terms) |term| {
+            switch (term) {
+                .variable => |v| {
+                    h.update(&[_]u8{'v'});
+                    h.update(v);
+                },
+                .constant => |c| {
+                    h.update(&[_]u8{'c'});
+                    h.update(c);
+                },
+            }
+            h.update(&[_]u8{0}); // separator
+        }
+        return h.final();
+    }
+
     pub fn format(self: Atom, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         try writer.print("{s}(", .{self.predicate});
         for (self.terms, 0..) |term, i| {
@@ -846,6 +867,17 @@ pub const MemoryFactSource = struct {
 // Evaluator (Bottom-up / Naive) - Uses arena for all allocations
 // =============================================================================
 
+/// Hash map context for Atom - enables O(1) fact deduplication
+pub const AtomContext = struct {
+    pub fn hash(_: AtomContext, atom: Atom) u64 {
+        return atom.hash();
+    }
+
+    pub fn eql(_: AtomContext, a: Atom, b: Atom) bool {
+        return a.eql(b);
+    }
+};
+
 /// Per-rule profiling stats
 pub const RuleProfile = struct {
     predicate: []const u8,
@@ -860,6 +892,7 @@ pub const Evaluator = struct {
     base_facts: ?FactSource,           // External fact source (optional)
     derived_facts: std.ArrayList(Atom), // Facts derived by rules
     by_predicate: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Atom)), // Predicate index
+    fact_set: std.HashMapUnmanaged(Atom, void, AtomContext, 80), // O(1) dedup
     rules: []Rule,
     profiling_enabled: bool = false,
     rule_profiles: ?[]RuleProfile = null,
@@ -871,6 +904,7 @@ pub const Evaluator = struct {
             .base_facts = null,
             .derived_facts = .{},
             .by_predicate = .{},
+            .fact_set = .{},
             .rules = rules,
         };
     }
@@ -882,6 +916,7 @@ pub const Evaluator = struct {
             .base_facts = source,
             .derived_facts = .{},
             .by_predicate = .{},
+            .fact_set = .{},
             .rules = rules,
         };
     }
@@ -934,35 +969,31 @@ pub const Evaluator = struct {
 
     /// Add a fact to derived facts (for initial facts when no base_facts source)
     pub fn addFact(self: *Evaluator, atom: Atom) !void {
-        // Check if already exists using predicate index (O(n) within predicate, not all facts)
-        if (self.by_predicate.get(atom.predicate)) |facts_for_pred| {
-            for (facts_for_pred.items) |existing| {
-                if (existing.eql(atom)) return;
-            }
-        }
-        // Dupe into arena and add to both lists
-        const duped = try atom.dupe(self.allocator());
-        try self.derived_facts.append(self.allocator(), duped);
+        const alloc = self.allocator();
+        // O(1) check using hash set
+        if (self.fact_set.contains(atom)) return;
+        // Dupe into arena and add to all indexes
+        const duped = try atom.dupe(alloc);
+        try self.derived_facts.append(alloc, duped);
         try self.indexFact(duped);
     }
 
-    /// Add a fact to the predicate index
+    /// Add a fact to the predicate index and hash set
     fn indexFact(self: *Evaluator, atom: Atom) !void {
         const alloc = self.allocator();
+        // Add to predicate index
         const gop = try self.by_predicate.getOrPut(alloc, atom.predicate);
         if (!gop.found_existing) {
             gop.value_ptr.* = .{};
         }
         try gop.value_ptr.append(alloc, atom);
+        // Add to hash set for O(1) dedup
+        try self.fact_set.put(alloc, atom, {});
     }
 
-    /// Check if a fact exists in derived facts (uses predicate index)
+    /// Check if a fact exists in derived facts - O(1) hash lookup
     fn factExistsInDerived(self: *Evaluator, atom: Atom) bool {
-        const facts_for_pred = self.by_predicate.get(atom.predicate) orelse return false;
-        for (facts_for_pred.items) |existing| {
-            if (existing.eql(atom)) return true;
-        }
-        return false;
+        return self.fact_set.contains(atom);
     }
 
     /// Check if a fact exists (in derived or base)
