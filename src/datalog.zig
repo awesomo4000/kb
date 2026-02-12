@@ -878,6 +878,38 @@ pub const AtomContext = struct {
     }
 };
 
+/// Key for argument index: (predicate, arg_position, constant_value)
+pub const ArgKey = struct {
+    predicate: []const u8,
+    arg_pos: u8,
+    value: []const u8,
+
+    pub fn hash(self: ArgKey) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(self.predicate);
+        h.update(&[_]u8{ 0, self.arg_pos, 0 });
+        h.update(self.value);
+        return h.final();
+    }
+
+    pub fn eql(a: ArgKey, b: ArgKey) bool {
+        return a.arg_pos == b.arg_pos and
+            std.mem.eql(u8, a.predicate, b.predicate) and
+            std.mem.eql(u8, a.value, b.value);
+    }
+};
+
+/// Hash map context for ArgKey
+pub const ArgKeyContext = struct {
+    pub fn hash(_: ArgKeyContext, key: ArgKey) u64 {
+        return key.hash();
+    }
+
+    pub fn eql(_: ArgKeyContext, a: ArgKey, b: ArgKey) bool {
+        return ArgKey.eql(a, b);
+    }
+};
+
 /// Per-rule profiling stats
 pub const RuleProfile = struct {
     predicate: []const u8,
@@ -893,6 +925,8 @@ pub const Evaluator = struct {
     derived_facts: std.ArrayList(Atom), // Facts derived by rules
     by_predicate: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Atom)), // Predicate index
     fact_set: std.HashMapUnmanaged(Atom, void, AtomContext, 80), // O(1) dedup
+    // Argument index: (predicate, arg_pos, value) -> facts with that constant at that position
+    by_arg: std.HashMapUnmanaged(ArgKey, std.ArrayListUnmanaged(Atom), ArgKeyContext, 80),
     // Semi-naive: delta facts from previous iteration
     delta_by_predicate: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Atom)),
     rules: []Rule,
@@ -907,6 +941,7 @@ pub const Evaluator = struct {
             .derived_facts = .{},
             .by_predicate = .{},
             .fact_set = .{},
+            .by_arg = .{},
             .delta_by_predicate = .{},
             .rules = rules,
         };
@@ -920,6 +955,7 @@ pub const Evaluator = struct {
             .derived_facts = .{},
             .by_predicate = .{},
             .fact_set = .{},
+            .by_arg = .{},
             .delta_by_predicate = .{},
             .rules = rules,
         };
@@ -993,6 +1029,24 @@ pub const Evaluator = struct {
         try gop.value_ptr.append(alloc, atom);
         // Add to hash set for O(1) dedup
         try self.fact_set.put(alloc, atom, {});
+        // Add to argument index for each constant term
+        for (atom.terms, 0..) |term, i| {
+            switch (term) {
+                .constant => |c| {
+                    const key = ArgKey{
+                        .predicate = atom.predicate,
+                        .arg_pos = @intCast(i),
+                        .value = c,
+                    };
+                    const arg_gop = try self.by_arg.getOrPut(alloc, key);
+                    if (!arg_gop.found_existing) {
+                        arg_gop.value_ptr.* = .{};
+                    }
+                    try arg_gop.value_ptr.append(alloc, atom);
+                },
+                .variable => {},
+            }
+        }
     }
 
     /// Check if a fact exists in derived facts - O(1) hash lookup
@@ -1187,9 +1241,36 @@ pub const Evaluator = struct {
         const alloc = self.allocator();
         var results: std.ArrayList(Binding) = .{};
 
-        // Match against derived facts using predicate index (O(1) lookup + O(n) within predicate)
-        if (self.by_predicate.get(pattern.predicate)) |facts_for_pred| {
-            try self.matchAtomAgainstList(pattern, facts_for_pred.items, &results);
+        // Try to use argument index if pattern has a constant
+        // Find first constant to use as index key
+        var use_arg_index = false;
+        var arg_key: ArgKey = undefined;
+        for (pattern.terms, 0..) |term, i| {
+            switch (term) {
+                .constant => |c| {
+                    arg_key = .{
+                        .predicate = pattern.predicate,
+                        .arg_pos = @intCast(i),
+                        .value = c,
+                    };
+                    use_arg_index = true;
+                    break;
+                },
+                .variable => {},
+            }
+        }
+
+        // Match against derived facts
+        if (use_arg_index) {
+            // Use argument index for O(1) lookup to smaller candidate set
+            if (self.by_arg.get(arg_key)) |facts_for_arg| {
+                try self.matchAtomAgainstList(pattern, facts_for_arg.items, &results);
+            }
+        } else {
+            // Fall back to predicate index (all variables in pattern)
+            if (self.by_predicate.get(pattern.predicate)) |facts_for_pred| {
+                try self.matchAtomAgainstList(pattern, facts_for_pred.items, &results);
+            }
         }
 
         // Match against base facts if we have a source
