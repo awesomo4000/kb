@@ -318,25 +318,32 @@ fn listCooccurring(store: *FactStore, allocator: std.mem.Allocator, writer: anyt
 }
 
 fn cmdIngest(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    // Build absolute path to store
+    const batch_size: usize = 50_000;
+
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = try std.process.getCwd(&cwd_buf);
     const store_path = try std.fs.path.joinZ(allocator, &.{ cwd, default_store_name });
     defer allocator.free(store_path);
 
-    var store = try FactStore.open(allocator, .{ .path = store_path });
+    // Use no_sync for bulk ingest - much faster, safe since data can be re-ingested
+    var store = try FactStore.open(allocator, .{ .path = store_path, .no_sync = true });
     defer store.close();
 
-    // Read from file (stdin not supported for now - need file arg)
     if (args.len == 0) {
         std.debug.print("Usage: kb ingest <file.jsonl>\n", .{});
         return;
     }
 
-    const content = try std.fs.cwd().readFileAlloc(allocator, args[0], 10 * 1024 * 1024);
+    // Read entire file - memory mapped by OS, efficient for large files
+    const content = try std.fs.cwd().readFileAlloc(allocator, args[0], std.math.maxInt(usize));
     defer allocator.free(content);
 
-    var count: usize = 0;
+    // Arena for current batch - reset after each flush
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var batch: std.ArrayList(FactStore.FactInput) = .{};
+    var total: usize = 0;
     var line_num: usize = 0;
 
     var lines = std.mem.splitScalar(u8, content, '\n');
@@ -344,23 +351,21 @@ fn cmdIngest(allocator: std.mem.Allocator, args: []const []const u8) !void {
         line_num += 1;
         if (line.len == 0) continue;
 
+        const arena_alloc = arena.allocator();
+
         // Parse JSON line
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch |err| {
+        const parsed = std.json.parseFromSlice(std.json.Value, arena_alloc, line, .{}) catch |err| {
             std.debug.print("JSON parse error on line {}: {}\n", .{ line_num, err });
             continue;
         };
-        defer parsed.deinit();
 
         const root = parsed.value;
         if (root != .object) continue;
 
-        // Extract edges array
         const edges_val = root.object.get("edges") orelse continue;
         if (edges_val != .array) continue;
 
-        // Convert to entities
         var entities: std.ArrayList(Entity) = .{};
-        defer entities.deinit(allocator);
 
         for (edges_val.array.items) |edge| {
             if (edge != .array) continue;
@@ -371,7 +376,7 @@ fn cmdIngest(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
             if (type_val != .string or id_val != .string) continue;
 
-            try entities.append(allocator, .{
+            try entities.append(arena_alloc, .{
                 .type = type_val.string,
                 .id = id_val.string,
             });
@@ -379,18 +384,37 @@ fn cmdIngest(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         if (entities.items.len == 0) continue;
 
-        // Extract source
         const source: ?[]const u8 = if (root.object.get("source")) |s|
             if (s == .string) s.string else null
         else
             null;
 
-        // Add fact
-        _ = try store.addFact(entities.items, source);
-        count += 1;
+        try batch.append(arena_alloc, .{
+            .entities = entities.items,
+            .source = source,
+        });
+
+        // Flush batch when full
+        if (batch.items.len >= batch_size) {
+            const ids = try store.addFacts(batch.items);
+            allocator.free(ids);
+            total += batch.items.len;
+            std.debug.print("Ingested {} facts...\n", .{total});
+
+            // Reset arena and batch for next chunk
+            _ = arena.reset(.retain_capacity);
+            batch = .{};
+        }
     }
 
-    std.debug.print("Ingested {} facts\n", .{count});
+    // Flush remaining
+    if (batch.items.len > 0) {
+        const ids = try store.addFacts(batch.items);
+        allocator.free(ids);
+        total += batch.items.len;
+    }
+
+    std.debug.print("Ingested {} facts\n", .{total});
 }
 
 /// Accumulated parse results from a file and all its includes

@@ -1,5 +1,5 @@
 .{
-    .name = .hold,
+    .name = .kb,
     .version = "0.0.1",
     .fingerprint = 0x1fca0d072a377a33,
     .minimum_zig_version = "0.15.2",
