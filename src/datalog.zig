@@ -893,6 +893,8 @@ pub const Evaluator = struct {
     derived_facts: std.ArrayList(Atom), // Facts derived by rules
     by_predicate: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Atom)), // Predicate index
     fact_set: std.HashMapUnmanaged(Atom, void, AtomContext, 80), // O(1) dedup
+    // Semi-naive: delta facts from previous iteration
+    delta_by_predicate: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Atom)),
     rules: []Rule,
     profiling_enabled: bool = false,
     rule_profiles: ?[]RuleProfile = null,
@@ -905,6 +907,7 @@ pub const Evaluator = struct {
             .derived_facts = .{},
             .by_predicate = .{},
             .fact_set = .{},
+            .delta_by_predicate = .{},
             .rules = rules,
         };
     }
@@ -917,6 +920,7 @@ pub const Evaluator = struct {
             .derived_facts = .{},
             .by_predicate = .{},
             .fact_set = .{},
+            .delta_by_predicate = .{},
             .rules = rules,
         };
     }
@@ -1007,49 +1011,170 @@ pub const Evaluator = struct {
         return false;
     }
 
-    /// Run fixed-point evaluation until no new facts are derived
+    /// Run semi-naive fixed-point evaluation until no new facts are derived.
+    /// Semi-naive only considers rule firings involving at least one delta fact.
     pub fn evaluate(self: *Evaluator) !void {
-        var changed = true;
         var iteration: usize = 0;
         const max_iterations = 10000; // Safety limit
 
-        while (changed and iteration < max_iterations) {
-            changed = false;
+        // First pass: evaluate all rules naively to seed delta
+        for (self.rules, 0..) |rule, rule_idx| {
+            if (rule.body.len == 0) continue;
+
+            const start_time = if (self.profiling_enabled) std.time.nanoTimestamp() else 0;
+            const bindings = try self.matchBody(rule.body);
+
+            var facts_this_rule: u64 = 0;
+            for (bindings) |binding| {
+                const new_fact = try self.substitute(rule.head, binding);
+                if (!self.factExistsInDerived(new_fact)) {
+                    try self.derived_facts.append(self.allocator(), new_fact);
+                    try self.indexFact(new_fact);
+                    try self.addToDelta(new_fact);
+                    facts_this_rule += 1;
+                }
+            }
+
+            if (self.profiling_enabled) {
+                if (self.rule_profiles) |profiles| {
+                    const elapsed = @as(u64, @intCast(std.time.nanoTimestamp() - start_time));
+                    profiles[rule_idx].total_time_ns += elapsed;
+                    profiles[rule_idx].bindings_generated += bindings.len;
+                    profiles[rule_idx].facts_derived += facts_this_rule;
+                    profiles[rule_idx].iterations += 1;
+                }
+            }
+        }
+
+        // Semi-naive iterations: only use delta facts
+        while (self.hasDeltaFacts() and iteration < max_iterations) {
             iteration += 1;
 
+            // Swap delta to "previous delta" for this iteration
+            var prev_delta = self.delta_by_predicate;
+            self.delta_by_predicate = .{};
+
             for (self.rules, 0..) |rule, rule_idx| {
-                if (rule.body.len == 0) continue; // Skip facts
+                if (rule.body.len == 0) continue;
 
                 const start_time = if (self.profiling_enabled) std.time.nanoTimestamp() else 0;
-
-                // Find all bindings that satisfy the body
-                const bindings = try self.matchBody(rule.body);
-
                 var facts_this_rule: u64 = 0;
-                // For each binding, instantiate the head
-                for (bindings) |binding| {
-                    const new_fact = try self.substitute(rule.head, binding);
-                    // Check if exists using predicate index (O(n) within predicate)
-                    if (!self.factExistsInDerived(new_fact)) {
-                        try self.derived_facts.append(self.allocator(), new_fact);
-                        try self.indexFact(new_fact);
-                        changed = true;
-                        facts_this_rule += 1;
+                var bindings_count: u64 = 0;
+
+                // Semi-naive: for each body position, try using delta there
+                // This ensures at least one atom matches a new fact
+                for (0..rule.body.len) |delta_pos| {
+                    const bindings = try self.matchBodySemiNaive(rule.body, &prev_delta, delta_pos);
+                    bindings_count += bindings.len;
+
+                    for (bindings) |binding| {
+                        const new_fact = try self.substitute(rule.head, binding);
+                        if (!self.factExistsInDerived(new_fact)) {
+                            try self.derived_facts.append(self.allocator(), new_fact);
+                            try self.indexFact(new_fact);
+                            try self.addToDelta(new_fact);
+                            facts_this_rule += 1;
+                        }
                     }
                 }
 
-                // Update profile stats
                 if (self.profiling_enabled) {
                     if (self.rule_profiles) |profiles| {
                         const elapsed = @as(u64, @intCast(std.time.nanoTimestamp() - start_time));
                         profiles[rule_idx].total_time_ns += elapsed;
-                        profiles[rule_idx].bindings_generated += bindings.len;
+                        profiles[rule_idx].bindings_generated += bindings_count;
                         profiles[rule_idx].facts_derived += facts_this_rule;
                         profiles[rule_idx].iterations += 1;
                     }
                 }
             }
         }
+    }
+
+    /// Add a fact to the delta index
+    fn addToDelta(self: *Evaluator, atom: Atom) !void {
+        const alloc = self.allocator();
+        const gop = try self.delta_by_predicate.getOrPut(alloc, atom.predicate);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{};
+        }
+        try gop.value_ptr.append(alloc, atom);
+    }
+
+    /// Check if there are any delta facts
+    fn hasDeltaFacts(self: *Evaluator) bool {
+        var iter = self.delta_by_predicate.valueIterator();
+        while (iter.next()) |list| {
+            if (list.items.len > 0) return true;
+        }
+        return false;
+    }
+
+    /// Match body with semi-naive strategy: position delta_pos uses delta facts,
+    /// earlier positions use all facts, later positions use all facts.
+    fn matchBodySemiNaive(
+        self: *Evaluator,
+        body: []Atom,
+        prev_delta: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Atom)),
+        delta_pos: usize,
+    ) ![]Binding {
+        const alloc = self.allocator();
+
+        if (body.len == 0) {
+            var result: std.ArrayList(Binding) = .{};
+            try result.append(alloc, Binding.init(alloc));
+            return result.toOwnedSlice(alloc);
+        }
+
+        // Check if delta has any facts for the delta position's predicate
+        const delta_pred = body[delta_pos].predicate;
+        if (prev_delta.get(delta_pred) == null) {
+            // No delta facts for this predicate, skip this variant
+            return &[_]Binding{};
+        }
+
+        // Start with first atom
+        var bindings = if (delta_pos == 0)
+            try self.matchAtomInDelta(body[0], prev_delta)
+        else
+            try self.matchAtom(body[0]);
+
+        // Join with remaining atoms
+        for (body[1..], 1..) |atom, pos| {
+            var new_bindings: std.ArrayList(Binding) = .{};
+
+            for (bindings) |binding| {
+                const substituted = try self.substituteAtom(atom, binding);
+                const matches = if (pos == delta_pos)
+                    try self.matchAtomInDelta(substituted, prev_delta)
+                else
+                    try self.matchAtom(substituted);
+
+                for (matches) |match| {
+                    if (try self.mergeBindings(binding, match)) |m| {
+                        try new_bindings.append(alloc, m);
+                    }
+                }
+            }
+            bindings = try new_bindings.toOwnedSlice(alloc);
+        }
+
+        return bindings;
+    }
+
+    /// Match atom only against delta facts (no base facts)
+    fn matchAtomInDelta(
+        self: *Evaluator,
+        pattern: Atom,
+        delta: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Atom)),
+    ) ![]Binding {
+        var results: std.ArrayList(Binding) = .{};
+
+        if (delta.get(pattern.predicate)) |facts_for_pred| {
+            try self.matchAtomAgainstList(pattern, facts_for_pred.items, &results);
+        }
+
+        return results.toOwnedSlice(self.allocator());
     }
 
     /// Query the fact set with a pattern. Results valid until Evaluator.deinit()
