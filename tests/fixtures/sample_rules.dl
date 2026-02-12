@@ -1,0 +1,34 @@
+% Sample Datalog rules for library facts
+% Maps hypergraph facts to predicates for querying
+%
+% Note: Current hypergraph matching requires exact entity count.
+% Patterns must match the number of entities in the fact.
+
+% Influence relationships (3 entities in fact, 3 in pattern - matches)
+@map influenced_by(A, B) = [rel:"influenced-by", author:A, author:B].
+
+% Contemporary relationships
+@map contemporary(A, B) = [rel:"contemporary", author:A, author:B].
+
+% === Derived relationships ===
+
+% Transitive influence: A influenced B, B influenced C => A influenced C
+influenced_t(A, B) :- influenced_by(A, B).
+influenced_t(A, C) :- influenced_by(A, B), influenced_t(B, C).
+
+% Reverse: who was influenced by whom
+was_influenced_by(A, B) :- influenced_by(B, A).
+
+% === Queries ===
+
+% Direct influence
+?- influenced_by(Who, "Homer").
+
+% Transitive influence (follow the chain)
+?- influenced_t(Who, "Homer").
+
+% Who did Virgil influence?
+?- influenced_by(Who, "Virgil").
+
+% Contemporaries
+?- contemporary(A, B).
