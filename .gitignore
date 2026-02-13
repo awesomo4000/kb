@@ -4,4 +4,6 @@ zig-out/
 .DS_Store
 .kb/
 x/
-adsec-dl/
+.claude/
+*.tgz
+misc/
