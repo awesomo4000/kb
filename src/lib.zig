@@ -24,6 +24,9 @@ pub const fact_fetcher = @import("fact_fetcher.zig");
 // Bitmap ingest pipeline
 pub const bitmap_ingest = @import("bitmap_ingest.zig");
 
+// Bitmap evaluator
+pub const bitmap_evaluator = @import("bitmap_evaluator.zig");
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("datalog.zig");
@@ -32,5 +35,6 @@ test {
     _ = @import("relation.zig");
     _ = @import("fact_fetcher.zig");
     _ = @import("bitmap_ingest.zig");
+    _ = @import("bitmap_evaluator.zig");
     _ = @import("test_helpers.zig");
 }
