@@ -14,6 +14,13 @@ pub fn build(b: *std.Build) void {
     });
     const lmdb_mod = lmdb_dep.module("lmdb");
 
+    // Rawr (roaring bitmap) dependency
+    const rawr_dep = b.dependency("rawr", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const rawr_mod = rawr_dep.module("rawr");
+
     // Main library module
     const lib_mod = b.addModule("kb", .{
         .root_source_file = b.path("src/lib.zig"),
@@ -21,6 +28,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     lib_mod.addImport("lmdb", lmdb_mod);
+    lib_mod.addImport("rawr", rawr_mod);
 
     // Main executable
     const exe_mod = b.createModule(.{
@@ -54,6 +62,7 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = sanitize_thread,
     });
     lib_test_mod.addImport("lmdb", lmdb_mod);
+    lib_test_mod.addImport("rawr", rawr_mod);
 
     const lib_tests = b.addTest(.{
         .root_module = lib_test_mod,

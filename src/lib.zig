@@ -15,9 +15,13 @@ pub const HypergraphFactSource = @import("hypergraph_source.zig").HypergraphFact
 // String interner for bitmap evaluator
 pub const StringInterner = @import("string_interner.zig").StringInterner;
 
+// Relation types for bitmap evaluator
+pub const relation = @import("relation.zig");
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("datalog.zig");
     _ = @import("hypergraph_source.zig");
     _ = @import("string_interner.zig");
+    _ = @import("relation.zig");
 }
