@@ -18,10 +18,14 @@ pub const StringInterner = @import("string_interner.zig").StringInterner;
 // Relation types for bitmap evaluator
 pub const relation = @import("relation.zig");
 
+// Fact fetcher interface for bitmap evaluator
+pub const fact_fetcher = @import("fact_fetcher.zig");
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("datalog.zig");
     _ = @import("hypergraph_source.zig");
     _ = @import("string_interner.zig");
     _ = @import("relation.zig");
+    _ = @import("fact_fetcher.zig");
 }

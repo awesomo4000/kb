@@ -97,6 +97,28 @@ pub const Fact = struct {
         };
     }
 
+    /// Clone a fact, allocating new memory for all data.
+    pub fn clone(self: Self, allocator: std.mem.Allocator) !Self {
+        const entities = try allocator.alloc(Entity, self.entities.len);
+        errdefer allocator.free(entities);
+
+        for (self.entities, 0..) |entity, i| {
+            const type_buf = try allocator.dupe(u8, entity.type);
+            errdefer allocator.free(type_buf);
+            const id_buf = try allocator.dupe(u8, entity.id);
+            entities[i] = .{
+                .type = type_buf,
+                .id = id_buf,
+            };
+        }
+
+        return .{
+            .id = self.id,
+            .entities = entities,
+            .source = if (self.source) |s| try allocator.dupe(u8, s) else null,
+        };
+    }
+
     /// Free memory allocated by deserialize
     pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
         for (self.entities) |entity| {
