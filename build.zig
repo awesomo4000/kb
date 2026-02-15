@@ -81,10 +81,27 @@ pub fn build(b: *std.Build) void {
     const integration_step = b.step("test-integration", "Run integration tests");
     integration_step.dependOn(&run_integration_tests.step);
 
+    // String interner tests (LMDB persistence)
+    const interner_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/string_interner_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = sanitize_thread,
+    });
+    interner_test_mod.addImport("lmdb", lmdb_mod);
+    interner_test_mod.addImport("kb", lib_mod);
+
+    const interner_tests = b.addTest(.{
+        .root_module = interner_test_mod,
+    });
+
+    const run_interner_tests = b.addRunArtifact(interner_tests);
+
     // All tests
     const all_tests_step = b.step("test-all", "Run all tests");
     all_tests_step.dependOn(&run_lib_tests.step);
     all_tests_step.dependOn(&run_integration_tests.step);
+    all_tests_step.dependOn(&run_interner_tests.step);
 
     // Benchmark
     const bench_mod = b.createModule(.{

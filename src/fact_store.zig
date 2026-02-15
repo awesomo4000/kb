@@ -34,7 +34,7 @@ pub const FactStore = struct {
 
         const env = try lmdb.Environment.init(options.path, .{
             .map_size = options.map_size,
-            .max_dbs = 4,
+            .max_dbs = 8,
             .no_sync = options.no_sync,
         });
 

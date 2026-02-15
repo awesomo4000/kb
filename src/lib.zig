@@ -12,8 +12,12 @@ pub const datalog = @import("datalog.zig");
 // Hypergraph-Datalog bridge
 pub const HypergraphFactSource = @import("hypergraph_source.zig").HypergraphFactSource;
 
+// String interner for bitmap evaluator
+pub const StringInterner = @import("string_interner.zig").StringInterner;
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("datalog.zig");
     _ = @import("hypergraph_source.zig");
+    _ = @import("string_interner.zig");
 }
