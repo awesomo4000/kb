@@ -96,6 +96,8 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_interner_tests = b.addRunArtifact(interner_tests);
+    const interner_step = b.step("test-interner", "Run string interner tests");
+    interner_step.dependOn(&run_interner_tests.step);
 
     // All tests
     const all_tests_step = b.step("test-all", "Run all tests");
