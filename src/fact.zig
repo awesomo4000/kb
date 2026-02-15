@@ -102,6 +102,14 @@ pub const Fact = struct {
         const entities = try allocator.alloc(Entity, self.entities.len);
         errdefer allocator.free(entities);
 
+        var initialized: usize = 0;
+        errdefer {
+            for (entities[0..initialized]) |e| {
+                allocator.free(@constCast(e.type));
+                allocator.free(@constCast(e.id));
+            }
+        }
+
         for (self.entities, 0..) |entity, i| {
             const type_buf = try allocator.dupe(u8, entity.type);
             errdefer allocator.free(type_buf);
@@ -110,6 +118,7 @@ pub const Fact = struct {
                 .type = type_buf,
                 .id = id_buf,
             };
+            initialized += 1;
         }
 
         return .{
