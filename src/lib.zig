@@ -32,4 +32,5 @@ test {
     _ = @import("relation.zig");
     _ = @import("fact_fetcher.zig");
     _ = @import("bitmap_ingest.zig");
+    _ = @import("test_helpers.zig");
 }
