@@ -7,8 +7,8 @@ A hypergraph-based fact store with Datalog queries.
 Everything is stored as **facts** — hyperedges connecting multiple typed entities.
 
 ```json
-{"edges": [["author", "alice"], ["book", "1984"], ["rel", "wrote"]], "source": "library"}
-{"edges": [["author", "alice"], ["book", "animal_farm"], ["rel", "wrote"]], "source": "library"}
+{"edges": [["author", "george"], ["book", "1984"], ["rel", "wrote"]], "source": "library"}
+{"edges": [["author", "george"], ["book", "animal_farm"], ["rel", "wrote"]], "source": "library"}
 ```
 
 Query from any angle:
