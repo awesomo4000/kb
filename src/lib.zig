@@ -1,3 +1,4 @@
+BROKEN ON PURPOSE
 const std = @import("std");
 const lmdb = @import("lmdb");
 
