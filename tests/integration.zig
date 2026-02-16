@@ -3,7 +3,8 @@ const kb = @import("kb");
 const FactStore = kb.FactStore;
 const Entity = kb.Entity;
 const datalog = kb.datalog;
-const HypergraphFactSource = kb.HypergraphFactSource;
+const BitmapEvaluator = kb.bitmap_evaluator.BitmapEvaluator;
+const HypergraphFetcher = kb.fact_fetcher.HypergraphFetcher;
 
 fn getTempPath(allocator: std.mem.Allocator) ![:0]const u8 {
     const random = std.crypto.random.int(u64);
@@ -210,19 +211,19 @@ test "datalog with hypergraph source" {
 
     const parsed = try parser.parseProgram();
 
-    // Create hypergraph fact source with mappings
-    var hg_source = HypergraphFactSource.init(&store, parsed.mappings);
-
-    // Create evaluator with hypergraph as base facts
-    var eval = datalog.Evaluator.initWithSource(allocator, parsed.rules, hg_source.source());
+    // Create bitmap evaluator and load mapped facts
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
     defer eval.deinit();
 
-    // Run evaluation
+    var hg_fetcher = HypergraphFetcher.init(&store);
+    try eval.loadMappedFacts(hg_fetcher.fetcher(), parsed.mappings);
+    try eval.addGroundFacts(parsed.rules);
     try eval.evaluate();
 
     // Query: Who did Homer influence transitively?
     var q1_terms = [_]datalog.Term{ .{ .constant = "Homer" }, .{ .variable = "Who" } };
     const results = try eval.query(.{ .predicate = "influenced_t", .terms = &q1_terms });
+    defer eval.freeQueryResults(results);
 
     // Homer -> Virgil -> Dante, Milton
     // So Homer influenced: Virgil, Dante, Milton (3 total)

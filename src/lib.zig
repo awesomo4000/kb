@@ -9,9 +9,6 @@ pub const Entity = @import("fact.zig").Entity;
 // Datalog engine
 pub const datalog = @import("datalog.zig");
 
-// Hypergraph-Datalog bridge
-pub const HypergraphFactSource = @import("hypergraph_source.zig").HypergraphFactSource;
-
 // String interner for bitmap evaluator
 pub const StringInterner = @import("string_interner.zig").StringInterner;
 
@@ -30,7 +27,6 @@ pub const bitmap_evaluator = @import("bitmap_evaluator.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = @import("datalog.zig");
-    _ = @import("hypergraph_source.zig");
     _ = @import("string_interner.zig");
     _ = @import("relation.zig");
     _ = @import("fact_fetcher.zig");
