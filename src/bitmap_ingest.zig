@@ -79,7 +79,7 @@ pub fn ingest(
 
 /// Build a lookup: for each arg name, which pattern position has that variable?
 /// Returns array parallel to mapping.args: arg_positions[i] = pattern index for args[i].
-fn buildArgPositions(mapping: Mapping, allocator: std.mem.Allocator) ![]usize {
+pub fn buildArgPositions(mapping: Mapping, allocator: std.mem.Allocator) ![]usize {
     const positions = try allocator.alloc(usize, mapping.args.len);
     for (mapping.args, 0..) |arg, i| {
         positions[i] = for (mapping.pattern, 0..) |elem, j| {

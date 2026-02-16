@@ -13,6 +13,12 @@ const Rule = datalog.Rule;
 const Atom = datalog.Atom;
 const Term = datalog.Term;
 const Binding = datalog.Binding;
+const Mapping = datalog.Mapping;
+const FactFetcher = @import("fact_fetcher.zig").FactFetcher;
+const Fact = @import("fact.zig").Fact;
+const Entity = @import("fact.zig").Entity;
+const bitmap_ingest = @import("bitmap_ingest.zig");
+const buildArgPositions = bitmap_ingest.buildArgPositions;
 
 const VarRef = struct {
     atom_idx: u8,
@@ -66,6 +72,51 @@ pub const BitmapEvaluator = struct {
                     try rel.binary.insert(id0, id1);
                 },
                 else => unreachable,
+            }
+        }
+    }
+
+    /// Load facts from an external store via @map directives.
+    /// Interns entity IDs as bare strings (not type-prefixed).
+    pub fn loadMappedFacts(
+        self: *BitmapEvaluator,
+        ff: FactFetcher,
+        mappings: []const Mapping,
+    ) !void {
+        for (mappings) |mapping| {
+            const arity = mapping.args.len;
+            if (arity == 0 or arity > 2) continue;
+
+            const arg_positions = try buildArgPositions(mapping, self.allocator);
+            defer self.allocator.free(arg_positions);
+
+            const facts = try ff.fetchFacts(mapping, self.allocator);
+            defer {
+                for (facts) |f| f.deinit(self.allocator);
+                self.allocator.free(facts);
+            }
+
+            for (facts) |fact| {
+                switch (arity) {
+                    1 => {
+                        const id = try self.interner.intern(
+                            fact.entities[arg_positions[0]].id,
+                        );
+                        const rel = try self.ensureRelation(mapping.predicate, 1);
+                        try rel.unary.insert(id);
+                    },
+                    2 => {
+                        const a = try self.interner.intern(
+                            fact.entities[arg_positions[0]].id,
+                        );
+                        const b = try self.interner.intern(
+                            fact.entities[arg_positions[1]].id,
+                        );
+                        const rel = try self.ensureRelation(mapping.predicate, 2);
+                        try rel.binary.insert(a, b);
+                    },
+                    else => unreachable,
+                }
             }
         }
     }
@@ -920,6 +971,79 @@ test "bitmap eval: query with no results" {
     const results2 = try eval.query(.{ .predicate = "nonexistent", .terms = &q2_terms });
     defer eval.freeQueryResults(results2);
     try std.testing.expectEqual(@as(usize, 0), results2.len);
+}
+
+test "bitmap eval: loadMappedFacts from mock fetcher" {
+    const allocator = std.testing.allocator;
+
+    // MockFetcher inline for this test
+    const MockFetcher = struct {
+        facts_by_predicate: std.StringHashMapUnmanaged([]const Fact),
+        alloc: std.mem.Allocator,
+
+        fn init(a: std.mem.Allocator) @This() {
+            return .{ .facts_by_predicate = .{}, .alloc = a };
+        }
+        fn deinit(self: *@This()) void {
+            self.facts_by_predicate.deinit(self.alloc);
+        }
+        fn addFacts(self: *@This(), predicate: []const u8, facts: []const Fact) !void {
+            try self.facts_by_predicate.put(self.alloc, predicate, facts);
+        }
+        fn fetcher(self: *@This()) FactFetcher {
+            return .{ .ptr = self, .vtable = &.{ .fetchFacts = fetchImpl } };
+        }
+        fn fetchImpl(ptr: *anyopaque, mapping: Mapping, a: std.mem.Allocator) anyerror![]const Fact {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            const stored = self.facts_by_predicate.get(mapping.predicate) orelse
+                return &[_]Fact{};
+            const result = try a.alloc(Fact, stored.len);
+            for (stored, 0..) |fact, i| {
+                result[i] = try fact.clone(a);
+            }
+            return result;
+        }
+    };
+
+    // Set up mock: wrote(Author, Book) = [rel:wrote, author:$A, book:$B]
+    var mock_entities = [_]Entity{
+        .{ .type = "rel", .id = "wrote" },
+        .{ .type = "author", .id = "Homer" },
+        .{ .type = "book", .id = "Iliad" },
+    };
+    var mock_facts = [_]Fact{
+        .{ .id = 1, .entities = &mock_entities, .source = null },
+    };
+
+    var mock = MockFetcher.init(allocator);
+    defer mock.deinit();
+    try mock.addFacts("wrote", &mock_facts);
+
+    const args = [_][]const u8{ "A", "B" };
+    const pattern = [_]Mapping.PatternElement{
+        .{ .entity_type = "rel", .value = .{ .constant = "wrote" } },
+        .{ .entity_type = "author", .value = .{ .variable = "A" } },
+        .{ .entity_type = "book", .value = .{ .variable = "B" } },
+    };
+    const mappings = [_]Mapping{.{
+        .predicate = "wrote",
+        .args = &args,
+        .pattern = &pattern,
+    }};
+
+    // No rules needed -- just loading mapped facts
+    var eval = BitmapEvaluator.init(allocator, &[_]Rule{});
+    defer eval.deinit();
+    try eval.loadMappedFacts(mock.fetcher(), &mappings);
+
+    // Query: wrote("Homer", Book) should return Iliad
+    // Key: bare "Homer" from entity.id matches bare "Homer" in query constant
+    var q_terms = [_]Term{ .{ .constant = "Homer" }, .{ .variable = "Book" } };
+    const results = try eval.query(.{ .predicate = "wrote", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("Iliad", results[0].get("Book").?);
 }
 
 test "bitmap eval: fixpoint converges" {
