@@ -86,6 +86,23 @@ assert_contains "$OUTPUT" "(3 results)" "3 authors influenced by Homer"
 assert_contains "$OUTPUT" "Plato" "found Plato"
 assert_contains "$OUTPUT" "Aristotle" "found Aristotle"
 
+# Test 4: Datalog - pure .dl (no @map, no LMDB store)
+echo ""
+echo "--- Test: Pure Datalog (no store) ---"
+PURE_DL=$(mktemp /tmp/kb-test-XXXXXX.dl)
+cat > "$PURE_DL" << 'EOF'
+edge("a", "b").
+edge("b", "c").
+reachable(X, Y) :- edge(X, Y).
+reachable(X, Z) :- edge(X, Y), reachable(Y, Z).
+?- reachable("a", X).
+EOF
+OUTPUT=$(cd /tmp && "$KB" datalog "$PURE_DL" 2>&1)
+assert_contains "$OUTPUT" "b" "reachable a->b"
+assert_contains "$OUTPUT" "c" "reachable a->c"
+assert_contains "$OUTPUT" "(2 results)" "2 reachable results"
+rm -f "$PURE_DL"
+
 # Clean up
 rm -rf "$TEST_DB"
 

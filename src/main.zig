@@ -513,8 +513,8 @@ fn parseDatalogWithIncludes(
 }
 
 fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const datalog = kb.datalog;
-    const HypergraphFactSource = kb.HypergraphFactSource;
+    const BitmapEvaluator = kb.bitmap_evaluator.BitmapEvaluator;
+    const HypergraphFetcher = kb.fact_fetcher.HypergraphFetcher;
 
     if (args.len == 0) {
         std.debug.print("Usage: kb datalog [--profile] <rules.dl>\n", .{});
@@ -537,15 +537,6 @@ fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
         std.debug.print("Usage: kb datalog [--profile] <rules.dl>\n", .{});
         return;
     }
-
-    // Build absolute path to store
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = try std.process.getCwd(&cwd_buf);
-    const store_path = try std.fs.path.joinZ(allocator, &.{ cwd, default_store_name });
-    defer allocator.free(store_path);
-
-    var store = try kb.FactStore.open(allocator, .{ .path = store_path });
-    defer store.close();
 
     // Parse rules file with include handling
     var visited = std.StringHashMap(void).init(allocator);
@@ -571,42 +562,45 @@ fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
         accumulated.queries.items.len,
     });
 
-    // Create hypergraph fact source
-    var hg_source = HypergraphFactSource.init(&store, accumulated.mappings.items);
-    defer hg_source.deinit();
-
-    // Create evaluator
-    var eval = datalog.Evaluator.initWithSource(allocator, accumulated.rules.items, hg_source.source());
+    // Create bitmap evaluator
+    var eval = BitmapEvaluator.init(allocator, accumulated.rules.items);
     defer eval.deinit();
 
-    // Enable profiling if requested
-    if (profile_enabled) {
-        try eval.enableProfiling();
+    // Load @map facts from LMDB if mappings exist
+    if (accumulated.mappings.items.len > 0) {
+        // Build absolute path to store
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = try std.process.getCwd(&cwd_buf);
+        const store_path = try std.fs.path.joinZ(allocator, &.{ cwd, default_store_name });
+        defer allocator.free(store_path);
+
+        var store = FactStore.open(allocator, .{ .path = store_path }) catch {
+            std.debug.print("Error: @map directives require a fact store (.kb directory)\n", .{});
+            std.debug.print("Run 'kb ingest <file>' first to create the store.\n", .{});
+            return;
+        };
+        defer store.close();
+
+        var hg_fetcher = HypergraphFetcher.init(&store);
+        try eval.loadMappedFacts(
+            hg_fetcher.fetcher(),
+            accumulated.mappings.items,
+        );
     }
 
-    // Add any ground facts from rules (facts with empty body)
-    for (accumulated.rules.items) |rule| {
-        if (rule.body.len == 0) {
-            try eval.addFact(rule.head);
-        }
-    }
-
-    // Preload all hypergraph facts into derived_facts for fast in-memory lookups
-    try eval.preloadBaseFacts(accumulated.mappings.items);
+    // Add ground facts from .dl
+    try eval.addGroundFacts(accumulated.rules.items);
 
     // Run evaluation
     var timer = try std.time.Timer.start();
     try eval.evaluate();
     const elapsed_ns = timer.read();
 
-    // Print profile results if enabled
     if (profile_enabled) {
-        eval.printProfile();
-        hg_source.printCacheStats();
+        std.debug.print("Relations: {}\n", .{eval.relations.count()});
     }
 
-    std.debug.print("Evaluation complete: {} derived facts in {d:.3}ms\n", .{
-        eval.derived_facts.items.len,
+    std.debug.print("Evaluation complete in {d:.3}ms\n", .{
         @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0,
     });
 
@@ -626,6 +620,8 @@ fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
         std.debug.print(")\n", .{});
 
         const results = try eval.query(pattern);
+        defer eval.freeQueryResults(results);
+
         if (results.len == 0) {
             std.debug.print("  (no results)\n", .{});
         } else {

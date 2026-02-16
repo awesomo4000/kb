@@ -64,10 +64,10 @@ pub const HypergraphFetcher = struct {
         defer allocator.free(fact_ids);
 
         // 3. Fetch each fact, filter by mapping pattern match
-        var results = std.ArrayList(Fact).init(allocator);
+        var results: std.ArrayList(Fact) = .{};
         errdefer {
             for (results.items) |*f| f.deinit(allocator);
-            results.deinit();
+            results.deinit(allocator);
         }
 
         for (fact_ids) |fact_id| {
@@ -75,13 +75,13 @@ pub const HypergraphFetcher = struct {
             errdefer fact.deinit(allocator);
 
             if (matchesMappingPattern(fact, mapping)) {
-                try results.append(fact);
+                try results.append(allocator, fact);
             } else {
                 fact.deinit(allocator);
             }
         }
 
-        return results.toOwnedSlice();
+        return results.toOwnedSlice(allocator);
     }
 };
 
