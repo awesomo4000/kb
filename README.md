@@ -13,7 +13,7 @@ Everything is stored as **facts** — hyperedges connecting multiple typed entit
 
 Query from any angle:
 ```bash
-kb get author/alice          # What did alice write?
+kb get author/george         # What did george write?
 kb get book/1984             # Who wrote 1984?
 kb get rel/wrote             # All author-book relationships
 ```
@@ -32,8 +32,8 @@ kb ingest data.jsonl
 
 # Query entities
 kb get author/
-kb get author/alice
-kb get author/alice/book/
+kb get author/george
+kb get author/george/book/
 
 # Run Datalog rules
 kb datalog rules.dl
