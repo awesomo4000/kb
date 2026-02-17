@@ -6,6 +6,7 @@ const BodyElement = datalog.BodyElement;
 
 pub const StratificationError = error{
     UnstratifiableProgram,
+    UnsafeNegation,
     OutOfMemory,
 };
 
@@ -176,6 +177,66 @@ fn hasNegation(rules: []const Rule) bool {
     return false;
 }
 
+/// Validate that all variables in negated atoms are bound by positive atoms
+/// in the same rule body. This is the standard Datalog safety requirement.
+pub fn validateSafety(rules: []const Rule) StratificationError!void {
+    for (rules) |rule| {
+        if (rule.body.len == 0) continue;
+        if (!hasNegation(&[_]Rule{rule})) continue;
+
+        // Collect variables bound by positive atoms
+        for (rule.body) |elem| {
+            if (elem != .negated_atom) continue;
+            const neg_atom = elem.negated_atom;
+
+            // Check each variable in the negated atom
+            for (neg_atom.terms) |term| {
+                switch (term) {
+                    .variable => |v| {
+                        // Check if this variable appears in any positive atom
+                        var bound = false;
+                        for (rule.body) |other_elem| {
+                            if (other_elem != .atom) continue;
+                            const pos_atom = other_elem.atom;
+                            for (pos_atom.terms) |pos_term| {
+                                switch (pos_term) {
+                                    .variable => |pv| {
+                                        if (std.mem.eql(u8, v, pv)) {
+                                            bound = true;
+                                            break;
+                                        }
+                                    },
+                                    .constant => {},
+                                }
+                                if (bound) break;
+                            }
+                            if (bound) break;
+                        }
+                        if (!bound) {
+                            std.debug.print("error: unsafe rule \xe2\x80\x94 variable \"{s}\" appears only in negation\n", .{v});
+                            printRule(rule);
+                            return error.UnsafeNegation;
+                        }
+                    },
+                    .constant => {},
+                }
+            }
+        }
+    }
+}
+
+/// Print a rule to stderr, indented with two spaces.
+fn printRule(rule: Rule) void {
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+    writer.print("{f}", .{rule}) catch {
+        std.debug.print("  <rule too long to display>\n", .{});
+        return;
+    };
+    std.debug.print("  {s}\n", .{fbs.getWritten()});
+}
+
 /// Stratify rules for semi-naive evaluation with negation.
 /// Returns strata in evaluation order (stratum 0 first).
 /// Ground facts (empty body) are excluded from strata.
@@ -192,6 +253,9 @@ pub fn stratify(rules: []const Rule, allocator: Allocator) StratificationError![
     if (non_ground.items.len == 0) {
         return allocator.alloc(Stratum, 0) catch return error.OutOfMemory;
     }
+
+    // Validate safety before proceeding
+    try validateSafety(non_ground.items);
 
     // Fast path: no negation -> single stratum
     if (!hasNegation(non_ground.items)) {
@@ -222,6 +286,22 @@ pub fn stratify(rules: []const Rule, allocator: Allocator) StratificationError![
                     // Check if target is in the same SCC
                     for (scc) |other| {
                         if (std.mem.eql(u8, edge.target, other)) {
+                            // Print error message naming the predicates
+                            std.debug.print("error: unstratifiable program \xe2\x80\x94 circular negation between \"{s}\" and \"{s}\"\n", .{ node, edge.target });
+                            // Print the offending rules
+                            for (non_ground.items) |rule| {
+                                const head = rule.head.predicate;
+                                var involves = false;
+                                for (scc) |pred| {
+                                    if (std.mem.eql(u8, head, pred)) {
+                                        involves = true;
+                                        break;
+                                    }
+                                }
+                                if (involves) {
+                                    printRule(rule);
+                                }
+                            }
                             return error.UnstratifiableProgram;
                         }
                     }
@@ -313,7 +393,7 @@ pub fn freeStrata(strata: []Stratum, allocator: Allocator) void {
 // Tests
 // =============================================================================
 
-test "no negation produces single stratum" {
+test "stratify: no negation → single stratum" {
     const allocator = std.testing.allocator;
     var parser = datalog.Parser.init(allocator,
         \\edge("a", "b").
@@ -330,7 +410,7 @@ test "no negation produces single stratum" {
     try std.testing.expectEqual(@as(usize, 2), strata[0].rules.len);
 }
 
-test "simple negation produces two strata" {
+test "stratify: simple negation → two strata" {
     const allocator = std.testing.allocator;
     var parser = datalog.Parser.init(allocator,
         \\author("Homer").
@@ -371,7 +451,7 @@ test "simple negation produces two strata" {
     try std.testing.expect(found_non_epic);
 }
 
-test "transitive deps with negation ordering" {
+test "stratify: transitive deps → correct ordering" {
     const allocator = std.testing.allocator;
     var parser = datalog.Parser.init(allocator,
         \\influenced("Homer", "Virgil").
@@ -404,7 +484,7 @@ test "transitive deps with negation ordering" {
     try std.testing.expect(influenced_t_stratum.? < not_influenced_stratum.?);
 }
 
-test "circular negation is unstratifiable" {
+test "stratify: circular negation → error" {
     const allocator = std.testing.allocator;
     var parser = datalog.Parser.init(allocator,
         \\book("The Iliad").
@@ -418,7 +498,7 @@ test "circular negation is unstratifiable" {
     try std.testing.expectError(error.UnstratifiableProgram, result);
 }
 
-test "ground facts excluded from strata" {
+test "stratify: ground facts excluded" {
     const allocator = std.testing.allocator;
     var parser = datalog.Parser.init(allocator,
         \\color("red").
@@ -433,4 +513,28 @@ test "ground facts excluded from strata" {
 
     // All rules are ground facts, no strata needed
     try std.testing.expectEqual(@as(usize, 0), strata.len);
+}
+
+test "unsafe negation rejected" {
+    const allocator = std.testing.allocator;
+    var parser = datalog.Parser.init(allocator,
+        \\bad(B) :- not genre(B, "epic").
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    const result = stratify(parsed.rules, allocator);
+    try std.testing.expectError(error.UnsafeNegation, result);
+}
+
+test "unsafe negation with unbound variable in negated binary" {
+    const allocator = std.testing.allocator;
+    var parser = datalog.Parser.init(allocator,
+        \\bad(A) :- author(A), not wrote(A, B).
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    const result = stratify(parsed.rules, allocator);
+    try std.testing.expectError(error.UnsafeNegation, result);
 }

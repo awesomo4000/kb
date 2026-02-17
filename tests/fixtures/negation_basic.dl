@@ -1,0 +1,4 @@
+author("Homer"). author("Virgil"). author("Plato").
+epic_author("Homer"). epic_author("Virgil").
+non_epic_author(A) :- author(A), not epic_author(A).
+?- non_epic_author(X).

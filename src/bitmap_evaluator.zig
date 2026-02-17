@@ -20,6 +20,7 @@ const Entity = @import("fact.zig").Entity;
 const bitmap_ingest = @import("bitmap_ingest.zig");
 const buildArgPositions = bitmap_ingest.buildArgPositions;
 const stratify_mod = @import("stratify.zig");
+const BodyElement = datalog.BodyElement;
 
 const VarRef = struct {
     atom_idx: u8,
@@ -147,9 +148,10 @@ pub const BitmapEvaluator = struct {
         defer deinitRelations(&deltas, self.allocator);
 
         for (rules) |rule| {
-            if (rule.body.len == 1) {
+            const pos_count = countPositiveAtoms(rule.body);
+            if (pos_count == 1) {
                 _ = try self.executeSingleAtomRule(rule, &self.relations, &deltas);
-            } else if (rule.body.len == 2) {
+            } else if (pos_count == 2) {
                 _ = try self.executeTwoAtomRule(rule, &self.relations, &self.relations, &deltas);
             }
         }
@@ -167,15 +169,19 @@ pub const BitmapEvaluator = struct {
             defer deinitRelations(&prev_deltas, self.allocator);
 
             for (rules) |rule| {
-                if (rule.body.len == 1) {
-                    if (prev_deltas.get(rule.body[0].atom.predicate) != null) {
+                const pos_count = countPositiveAtoms(rule.body);
+                if (pos_count == 1) {
+                    const pos_atom = getPositiveAtom(rule.body, 0);
+                    if (prev_deltas.get(pos_atom.predicate) != null) {
                         _ = try self.executeSingleAtomRule(rule, &prev_deltas, &deltas);
                     }
-                } else if (rule.body.len == 2) {
-                    if (prev_deltas.get(rule.body[0].atom.predicate) != null) {
+                } else if (pos_count == 2) {
+                    const pos0 = getPositiveAtom(rule.body, 0);
+                    const pos1 = getPositiveAtom(rule.body, 1);
+                    if (prev_deltas.get(pos0.predicate) != null) {
                         _ = try self.executeTwoAtomRule(rule, &prev_deltas, &self.relations, &deltas);
                     }
-                    if (prev_deltas.get(rule.body[1].atom.predicate) != null) {
+                    if (prev_deltas.get(pos1.predicate) != null) {
                         _ = try self.executeTwoAtomRule(rule, &self.relations, &prev_deltas, &deltas);
                     }
                 }
@@ -208,6 +214,90 @@ pub const BitmapEvaluator = struct {
             b.deinit();
         }
         self.allocator.free(results);
+    }
+
+    // =========================================================================
+    // Negation helpers
+    // =========================================================================
+
+    /// Count positive atoms in a rule body.
+    fn countPositiveAtoms(body: []const BodyElement) usize {
+        var count: usize = 0;
+        for (body) |elem| {
+            if (elem == .atom) count += 1;
+        }
+        return count;
+    }
+
+    /// Get the nth positive atom from a rule body.
+    fn getPositiveAtom(body: []const BodyElement, n: usize) Atom {
+        var count: usize = 0;
+        for (body) |elem| {
+            if (elem == .atom) {
+                if (count == n) return elem.atom;
+                count += 1;
+            }
+        }
+        unreachable;
+    }
+
+    /// Collect negated atoms from a rule body.
+    fn collectNegatedAtoms(body: []const BodyElement) []const BodyElement {
+        // Return the full body slice - callers filter by .negated_atom
+        return body;
+    }
+
+    /// Check if a negated atom passes (i.e., the atom is NOT in the relations).
+    /// Returns true if the negation holds (atom not found), false if it fails (atom found).
+    fn checkNegation(
+        self: *BitmapEvaluator,
+        negated_atom: Atom,
+        var_bindings: *const std.StringHashMapUnmanaged(u32),
+    ) bool {
+        const rel_ptr = self.relations.getPtr(negated_atom.predicate) orelse return true;
+
+        // Resolve all terms of the negated atom
+        var resolved: [2]?u32 = .{ null, null };
+        for (negated_atom.terms, 0..) |term, i| {
+            if (i >= 2) break;
+            resolved[i] = switch (term) {
+                .constant => |c| self.interner.lookup(c),
+                .variable => |v| var_bindings.get(v),
+            };
+            // If a variable is unbound, we cannot check - treat as passing
+            if (resolved[i] == null) return true;
+        }
+
+        // Check if the tuple exists in the relation
+        return switch (rel_ptr.*) {
+            .unary => |u| !u.contains(resolved[0].?),
+            .binary => |b| !b.contains(resolved[0].?, resolved[1].?),
+        };
+    }
+
+    /// Check all negated atoms in a rule body against current variable bindings.
+    /// Returns true if ALL negations pass (none of the negated atoms are found).
+    fn checkAllNegations(
+        self: *BitmapEvaluator,
+        body: []const BodyElement,
+        var_bindings: *const std.StringHashMapUnmanaged(u32),
+    ) bool {
+        for (body) |elem| {
+            if (elem == .negated_atom) {
+                if (!self.checkNegation(elem.negated_atom, var_bindings)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /// Check if a rule body has any negated atoms.
+    fn hasNegatedAtoms(body: []const BodyElement) bool {
+        for (body) |elem| {
+            if (elem == .negated_atom) return true;
+        }
+        return false;
     }
 
     // =========================================================================
@@ -273,9 +363,10 @@ pub const BitmapEvaluator = struct {
         source_rels: *RelationMap,
         deltas: *RelationMap,
     ) !bool {
-        const body_atom = rule.body[0].atom;
+        const body_atom = getPositiveAtom(rule.body, 0);
         const head = rule.head;
         const head_arity = head.terms.len;
+        const has_negation = hasNegatedAtoms(rule.body);
 
         const source_ptr = source_rels.getPtr(body_atom.predicate) orelse return false;
 
@@ -329,10 +420,18 @@ pub const BitmapEvaluator = struct {
         var new_tuples = std.ArrayListUnmanaged([2]u32){};
         defer new_tuples.deinit(self.allocator);
 
+        // Temporary variable bindings for negation checking
+        var var_bindings: std.StringHashMapUnmanaged(u32) = .{};
+        defer var_bindings.deinit(self.allocator);
+
         switch (source_ptr.*) {
             .binary => |*source| {
                 if (body_bound[0] != null and body_bound[1] != null) {
                     if (source.contains(body_bound[0].?, body_bound[1].?)) {
+                        if (has_negation) {
+                            self.buildVarBindingsFromAtom(body_atom, .{ body_bound[0].?, body_bound[1].? }, &var_bindings);
+                            if (!self.checkAllNegations(rule.body, &var_bindings)) return false;
+                        }
                         const hv = self.computeHeadVals(head, head_from_body, .{ body_bound[0].?, body_bound[1].? }) catch return false;
                         if (!self.targetContains(head.predicate, head_arity, hv)) {
                             try new_tuples.append(self.allocator, hv);
@@ -343,6 +442,10 @@ pub const BitmapEvaluator = struct {
                     var iter = fwd.iterator();
                     while (iter.next()) |b_val| {
                         if (same_var and c0 != b_val) continue;
+                        if (has_negation) {
+                            self.buildVarBindingsFromAtom(body_atom, .{ c0, b_val }, &var_bindings);
+                            if (!self.checkAllNegations(rule.body, &var_bindings)) continue;
+                        }
                         const hv = self.computeHeadVals(head, head_from_body, .{ c0, b_val }) catch continue;
                         if (!self.targetContains(head.predicate, head_arity, hv)) {
                             try new_tuples.append(self.allocator, hv);
@@ -353,6 +456,10 @@ pub const BitmapEvaluator = struct {
                     var iter = rev.iterator();
                     while (iter.next()) |a_val| {
                         if (same_var and a_val != c1) continue;
+                        if (has_negation) {
+                            self.buildVarBindingsFromAtom(body_atom, .{ a_val, c1 }, &var_bindings);
+                            if (!self.checkAllNegations(rule.body, &var_bindings)) continue;
+                        }
                         const hv = self.computeHeadVals(head, head_from_body, .{ a_val, c1 }) catch continue;
                         if (!self.targetContains(head.predicate, head_arity, hv)) {
                             try new_tuples.append(self.allocator, hv);
@@ -365,6 +472,10 @@ pub const BitmapEvaluator = struct {
                         var b_iter = fwd.iterator();
                         while (b_iter.next()) |b_val| {
                             if (same_var and a_val != b_val) continue;
+                            if (has_negation) {
+                                self.buildVarBindingsFromAtom(body_atom, .{ a_val, b_val }, &var_bindings);
+                                if (!self.checkAllNegations(rule.body, &var_bindings)) continue;
+                            }
                             const hv = self.computeHeadVals(head, head_from_body, .{ a_val, b_val }) catch continue;
                             if (!self.targetContains(head.predicate, head_arity, hv)) {
                                 try new_tuples.append(self.allocator, hv);
@@ -379,6 +490,10 @@ pub const BitmapEvaluator = struct {
                     .variable => {
                         var iter = source.members.iterator();
                         while (iter.next()) |val| {
+                            if (has_negation) {
+                                self.buildVarBindingsFromAtom(body_atom, .{ val, 0 }, &var_bindings);
+                                if (!self.checkAllNegations(rule.body, &var_bindings)) continue;
+                            }
                             const hv = self.computeHeadVals(head, head_from_body, .{ val, 0 }) catch continue;
                             if (!self.targetContains(head.predicate, head_arity, hv)) {
                                 try new_tuples.append(self.allocator, hv);
@@ -398,6 +513,23 @@ pub const BitmapEvaluator = struct {
         return changed;
     }
 
+    /// Build variable bindings from a single atom and its resolved values.
+    fn buildVarBindingsFromAtom(
+        self: *BitmapEvaluator,
+        atom: Atom,
+        vals: [2]u32,
+        bindings: *std.StringHashMapUnmanaged(u32),
+    ) void {
+        bindings.clearRetainingCapacity();
+        for (atom.terms, 0..) |term, i| {
+            if (i >= 2) break;
+            switch (term) {
+                .variable => |v| bindings.put(self.allocator, v, vals[i]) catch {},
+                .constant => {},
+            }
+        }
+    }
+
     // =========================================================================
     // Two-atom join rule execution
     // =========================================================================
@@ -409,10 +541,13 @@ pub const BitmapEvaluator = struct {
         right_source: *RelationMap,
         deltas: *RelationMap,
     ) !bool {
-        const analysis = analyzeJoin(rule) catch return false;
+        const pos0 = getPositiveAtom(rule.body, 0);
+        const pos1 = getPositiveAtom(rule.body, 1);
+        const analysis = analyzeJoinAtoms(pos0, pos1, rule.head) catch return false;
+        const has_negation = hasNegatedAtoms(rule.body);
 
-        const left_ptr = left_source.getPtr(rule.body[0].atom.predicate) orelse return false;
-        const right_ptr = right_source.getPtr(rule.body[1].atom.predicate) orelse return false;
+        const left_ptr = left_source.getPtr(pos0.predicate) orelse return false;
+        const right_ptr = right_source.getPtr(pos1.predicate) orelse return false;
 
         var left = switch (left_ptr.*) {
             .binary => |*b| b,
@@ -424,11 +559,9 @@ pub const BitmapEvaluator = struct {
         };
 
         // Resolve constants in body atoms
-        const left_atom = rule.body[0].atom;
-        const right_atom = rule.body[1].atom;
         var left_bound: [2]?u32 = .{ null, null };
         var right_bound: [2]?u32 = .{ null, null };
-        for (left_atom.terms, 0..) |term, i| {
+        for (pos0.terms, 0..) |term, i| {
             if (i >= 2) break;
             switch (term) {
                 .constant => |c| {
@@ -437,7 +570,7 @@ pub const BitmapEvaluator = struct {
                 .variable => {},
             }
         }
-        for (right_atom.terms, 0..) |term, i| {
+        for (pos1.terms, 0..) |term, i| {
             if (i >= 2) break;
             switch (term) {
                 .constant => |c| {
@@ -495,6 +628,10 @@ pub const BitmapEvaluator = struct {
         var new_tuples = std.ArrayListUnmanaged([2]u32){};
         defer new_tuples.deinit(self.allocator);
 
+        // Temporary variable bindings for negation checking
+        var var_bindings: std.StringHashMapUnmanaged(u32) = .{};
+        defer var_bindings.deinit(self.allocator);
+
         var cand_iter = candidates.iterator();
         while (cand_iter.next()) |join_val| {
             const left_others = getOtherSide(left, analysis.left_pos, join_val) orelse continue;
@@ -510,6 +647,34 @@ pub const BitmapEvaluator = struct {
                 while (right_iter.next()) |right_val| {
                     if (right_non_join_bound) |rb| {
                         if (right_val != rb) continue;
+                    }
+
+                    // Check negations if present
+                    if (has_negation) {
+                        // Build var bindings from both positive atoms
+                        var left_vals: [2]u32 = undefined;
+                        var right_vals: [2]u32 = undefined;
+                        left_vals[analysis.left_pos] = join_val;
+                        left_vals[1 - analysis.left_pos] = left_val;
+                        right_vals[analysis.right_pos] = join_val;
+                        right_vals[1 - analysis.right_pos] = right_val;
+
+                        var_bindings.clearRetainingCapacity();
+                        for (pos0.terms, 0..) |term, ti| {
+                            if (ti >= 2) break;
+                            switch (term) {
+                                .variable => |v| var_bindings.put(self.allocator, v, left_vals[ti]) catch {},
+                                .constant => {},
+                            }
+                        }
+                        for (pos1.terms, 0..) |term, ti| {
+                            if (ti >= 2) break;
+                            switch (term) {
+                                .variable => |v| var_bindings.put(self.allocator, v, right_vals[ti]) catch {},
+                                .constant => {},
+                            }
+                        }
+                        if (!self.checkAllNegations(rule.body, &var_bindings)) continue;
                     }
 
                     var head_vals: [2]u32 = .{ 0, 0 };
@@ -599,12 +764,7 @@ pub const BitmapEvaluator = struct {
         return false;
     }
 
-    fn analyzeJoin(rule: Rule) !JoinAnalysis {
-        if (rule.body.len != 2) return error.UnsupportedRule;
-
-        const left = rule.body[0].atom;
-        const right = rule.body[1].atom;
-
+    fn analyzeJoinAtoms(left: Atom, right: Atom, head: Atom) !JoinAnalysis {
         var join_var: ?[]const u8 = null;
         var left_pos: u8 = 0;
         var right_pos: u8 = 0;
@@ -638,7 +798,7 @@ pub const BitmapEvaluator = struct {
             .{ .atom_idx = 0, .term_pos = 0 },
         };
 
-        for (rule.head.terms, 0..) |ht, hi| {
+        for (head.terms, 0..) |ht, hi| {
             if (hi >= 2) break;
             switch (ht) {
                 .variable => |hv| {
@@ -1081,4 +1241,137 @@ test "bitmap eval: fixpoint converges" {
     defer eval.freeQueryResults(results);
 
     try std.testing.expectEqual(@as(usize, 9), results.len);
+}
+
+test "bitmap eval: basic negation" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\author("Homer"). author("Virgil"). author("Plato").
+        \\epic_author("Homer"). epic_author("Virgil").
+        \\non_epic_author(A) :- author(A), not epic_author(A).
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    var q_terms = [_]Term{.{ .variable = "X" }};
+    const results = try eval.query(.{ .predicate = "non_epic_author", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("Plato", results[0].get("X").?);
+}
+
+test "bitmap eval: negation against empty relation" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\author("Homer"). author("Virgil"). author("Plato").
+        \\not_excluded(A) :- author(A), not excluded(A).
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    // excluded is empty, so all authors should pass negation
+    var q_terms = [_]Term{.{ .variable = "X" }};
+    const results = try eval.query(.{ .predicate = "not_excluded", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    try std.testing.expectEqual(@as(usize, 3), results.len);
+}
+
+test "bitmap eval: multi-stratum negation" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\influenced("Homer", "Virgil").
+        \\influenced("Virgil", "Dante").
+        \\influenced("Virgil", "Milton").
+        \\influenced_t(A, B) :- influenced(A, B).
+        \\influenced_t(A, C) :- influenced(A, B), influenced_t(B, C).
+        \\author("Homer"). author("Virgil"). author("Dante").
+        \\author("Milton"). author("Plato").
+        \\not_in_homeric_tradition(A) :- author(A), not influenced_t("Homer", A).
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    var q_terms = [_]Term{.{ .variable = "X" }};
+    const results = try eval.query(.{ .predicate = "not_in_homeric_tradition", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    // Homer influences Virgil, Dante, Milton (transitively)
+    // So not_in_homeric_tradition should be: Homer (not influenced by himself) and Plato
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+
+    var found_homer = false;
+    var found_plato = false;
+    for (results) |binding| {
+        const x = binding.get("X").?;
+        if (std.mem.eql(u8, x, "Homer")) found_homer = true;
+        if (std.mem.eql(u8, x, "Plato")) found_plato = true;
+    }
+    try std.testing.expect(found_homer);
+    try std.testing.expect(found_plato);
+}
+
+test "bitmap eval: unstratifiable program rejected" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\book("The Iliad").
+        \\popular(B) :- book(B), not obscure(B).
+        \\obscure(B) :- book(B), not popular(B).
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+
+    const result = eval.evaluate();
+    try std.testing.expectError(error.UnstratifiableProgram, result);
+}
+
+test "bitmap eval: binary relation negation" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\wrote("Homer", "The Iliad"). wrote("Homer", "The Odyssey").
+        \\wrote("Virgil", "The Aeneid"). wrote("Plato", "The Republic").
+        \\genre("The Iliad", "epic"). genre("The Odyssey", "epic").
+        \\genre("The Aeneid", "epic"). genre("The Republic", "philosophy").
+        \\non_epic_work(A, B) :- wrote(A, B), not genre(B, "epic").
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    var q_terms = [_]Term{ .{ .variable = "X" }, .{ .variable = "Y" } };
+    const results = try eval.query(.{ .predicate = "non_epic_work", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("Plato", results[0].get("X").?);
+    try std.testing.expectEqualStrings("The Republic", results[0].get("Y").?);
 }
