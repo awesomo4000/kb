@@ -22,7 +22,7 @@ pub const Term = union(enum) {
         };
     }
 
-    pub fn format(self: Term, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Term, writer: anytype) !void {
         switch (self) {
             .variable => |v| try writer.print("{s}", .{v}),
             .constant => |c| try writer.print("\"{s}\"", .{c}),
@@ -78,11 +78,11 @@ pub const Atom = struct {
         return h.final();
     }
 
-    pub fn format(self: Atom, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Atom, writer: anytype) !void {
         try writer.print("{s}(", .{self.predicate});
         for (self.terms, 0..) |term, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writer.print("{}", .{term});
+            try writer.print("{f}", .{term});
         }
         try writer.writeAll(")");
     }
@@ -120,12 +120,12 @@ pub const BodyElement = union(enum) {
         return self == .negated_atom;
     }
 
-    pub fn format(self: BodyElement, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: BodyElement, writer: anytype) !void {
         switch (self) {
-            .atom => |a| try writer.print("{}", .{a}),
+            .atom => |a| try writer.print("{f}", .{a}),
             .negated_atom => |a| {
                 try writer.writeAll("not ");
-                try writer.print("{}", .{a});
+                try writer.print("{f}", .{a});
             },
         }
     }
@@ -149,13 +149,13 @@ pub const Rule = struct {
     head: Atom,
     body: []BodyElement,
 
-    pub fn format(self: Rule, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        try writer.print("{}", .{self.head});
+    pub fn format(self: Rule, writer: anytype) !void {
+        try writer.print("{f}", .{self.head});
         if (self.body.len > 0) {
             try writer.writeAll(" :- ");
             for (self.body, 0..) |elem, i| {
                 if (i > 0) try writer.writeAll(", ");
-                try writer.print("{}", .{elem});
+                try writer.print("{f}", .{elem});
             }
         }
         try writer.writeAll(".");

@@ -213,7 +213,8 @@ pub fn validateSafety(rules: []const Rule) StratificationError!void {
                             if (bound) break;
                         }
                         if (!bound) {
-                            std.debug.print("error: unsafe rule - variable \"{s}\" appears only in negation\n", .{v});
+                            std.debug.print("error: unsafe rule \xe2\x80\x94 variable \"{s}\" appears only in negation\n", .{v});
+                            printRule(rule);
                             return error.UnsafeNegation;
                         }
                     },
@@ -222,6 +223,18 @@ pub fn validateSafety(rules: []const Rule) StratificationError!void {
             }
         }
     }
+}
+
+/// Print a rule to stderr, indented with two spaces.
+fn printRule(rule: Rule) void {
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+    writer.print("{f}", .{rule}) catch {
+        std.debug.print("  <rule too long to display>\n", .{});
+        return;
+    };
+    std.debug.print("  {s}\n", .{fbs.getWritten()});
 }
 
 /// Stratify rules for semi-naive evaluation with negation.
@@ -273,6 +286,22 @@ pub fn stratify(rules: []const Rule, allocator: Allocator) StratificationError![
                     // Check if target is in the same SCC
                     for (scc) |other| {
                         if (std.mem.eql(u8, edge.target, other)) {
+                            // Print error message naming the predicates
+                            std.debug.print("error: unstratifiable program \xe2\x80\x94 circular negation between \"{s}\" and \"{s}\"\n", .{ node, edge.target });
+                            // Print the offending rules
+                            for (non_ground.items) |rule| {
+                                const head = rule.head.predicate;
+                                var involves = false;
+                                for (scc) |pred| {
+                                    if (std.mem.eql(u8, head, pred)) {
+                                        involves = true;
+                                        break;
+                                    }
+                                }
+                                if (involves) {
+                                    printRule(rule);
+                                }
+                            }
                             return error.UnstratifiableProgram;
                         }
                     }
@@ -364,7 +393,7 @@ pub fn freeStrata(strata: []Stratum, allocator: Allocator) void {
 // Tests
 // =============================================================================
 
-test "no negation produces single stratum" {
+test "stratify: no negation → single stratum" {
     const allocator = std.testing.allocator;
     var parser = datalog.Parser.init(allocator,
         \\edge("a", "b").
@@ -381,7 +410,7 @@ test "no negation produces single stratum" {
     try std.testing.expectEqual(@as(usize, 2), strata[0].rules.len);
 }
 
-test "simple negation produces two strata" {
+test "stratify: simple negation → two strata" {
     const allocator = std.testing.allocator;
     var parser = datalog.Parser.init(allocator,
         \\author("Homer").
@@ -422,7 +451,7 @@ test "simple negation produces two strata" {
     try std.testing.expect(found_non_epic);
 }
 
-test "transitive deps with negation ordering" {
+test "stratify: transitive deps → correct ordering" {
     const allocator = std.testing.allocator;
     var parser = datalog.Parser.init(allocator,
         \\influenced("Homer", "Virgil").
@@ -455,7 +484,7 @@ test "transitive deps with negation ordering" {
     try std.testing.expect(influenced_t_stratum.? < not_influenced_stratum.?);
 }
 
-test "circular negation is unstratifiable" {
+test "stratify: circular negation → error" {
     const allocator = std.testing.allocator;
     var parser = datalog.Parser.init(allocator,
         \\book("The Iliad").
@@ -469,7 +498,7 @@ test "circular negation is unstratifiable" {
     try std.testing.expectError(error.UnstratifiableProgram, result);
 }
 
-test "ground facts excluded from strata" {
+test "stratify: ground facts excluded" {
     const allocator = std.testing.allocator;
     var parser = datalog.Parser.init(allocator,
         \\color("red").

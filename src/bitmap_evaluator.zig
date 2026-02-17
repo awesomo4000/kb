@@ -1330,6 +1330,25 @@ test "bitmap eval: multi-stratum negation" {
     try std.testing.expect(found_plato);
 }
 
+test "bitmap eval: unstratifiable program rejected" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\book("The Iliad").
+        \\popular(B) :- book(B), not obscure(B).
+        \\obscure(B) :- book(B), not popular(B).
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+
+    const result = eval.evaluate();
+    try std.testing.expectError(error.UnstratifiableProgram, result);
+}
+
 test "bitmap eval: binary relation negation" {
     const allocator = std.testing.allocator;
 
