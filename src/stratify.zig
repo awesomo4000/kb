@@ -6,6 +6,7 @@ const BodyElement = datalog.BodyElement;
 
 pub const StratificationError = error{
     UnstratifiableProgram,
+    UnsafeNegation,
     OutOfMemory,
 };
 
@@ -176,6 +177,53 @@ fn hasNegation(rules: []const Rule) bool {
     return false;
 }
 
+/// Validate that all variables in negated atoms are bound by positive atoms
+/// in the same rule body. This is the standard Datalog safety requirement.
+pub fn validateSafety(rules: []const Rule) StratificationError!void {
+    for (rules) |rule| {
+        if (rule.body.len == 0) continue;
+        if (!hasNegation(&[_]Rule{rule})) continue;
+
+        // Collect variables bound by positive atoms
+        for (rule.body) |elem| {
+            if (elem != .negated_atom) continue;
+            const neg_atom = elem.negated_atom;
+
+            // Check each variable in the negated atom
+            for (neg_atom.terms) |term| {
+                switch (term) {
+                    .variable => |v| {
+                        // Check if this variable appears in any positive atom
+                        var bound = false;
+                        for (rule.body) |other_elem| {
+                            if (other_elem != .atom) continue;
+                            const pos_atom = other_elem.atom;
+                            for (pos_atom.terms) |pos_term| {
+                                switch (pos_term) {
+                                    .variable => |pv| {
+                                        if (std.mem.eql(u8, v, pv)) {
+                                            bound = true;
+                                            break;
+                                        }
+                                    },
+                                    .constant => {},
+                                }
+                                if (bound) break;
+                            }
+                            if (bound) break;
+                        }
+                        if (!bound) {
+                            std.debug.print("error: unsafe rule - variable \"{s}\" appears only in negation\n", .{v});
+                            return error.UnsafeNegation;
+                        }
+                    },
+                    .constant => {},
+                }
+            }
+        }
+    }
+}
+
 /// Stratify rules for semi-naive evaluation with negation.
 /// Returns strata in evaluation order (stratum 0 first).
 /// Ground facts (empty body) are excluded from strata.
@@ -192,6 +240,9 @@ pub fn stratify(rules: []const Rule, allocator: Allocator) StratificationError![
     if (non_ground.items.len == 0) {
         return allocator.alloc(Stratum, 0) catch return error.OutOfMemory;
     }
+
+    // Validate safety before proceeding
+    try validateSafety(non_ground.items);
 
     // Fast path: no negation -> single stratum
     if (!hasNegation(non_ground.items)) {
@@ -433,4 +484,28 @@ test "ground facts excluded from strata" {
 
     // All rules are ground facts, no strata needed
     try std.testing.expectEqual(@as(usize, 0), strata.len);
+}
+
+test "unsafe negation rejected" {
+    const allocator = std.testing.allocator;
+    var parser = datalog.Parser.init(allocator,
+        \\bad(B) :- not genre(B, "epic").
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    const result = stratify(parsed.rules, allocator);
+    try std.testing.expectError(error.UnsafeNegation, result);
+}
+
+test "unsafe negation with unbound variable in negated binary" {
+    const allocator = std.testing.allocator;
+    var parser = datalog.Parser.init(allocator,
+        \\bad(A) :- author(A), not wrote(A, B).
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    const result = stratify(parsed.rules, allocator);
+    try std.testing.expectError(error.UnsafeNegation, result);
 }

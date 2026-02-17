@@ -598,6 +598,9 @@ fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
             std.debug.print("error: program contains circular negation and cannot be stratified\n", .{});
             std.process.exit(1);
         }
+        if (err == error.UnsafeNegation) {
+            std.process.exit(1);
+        }
         return err;
     };
     const elapsed_ns = timer.read();

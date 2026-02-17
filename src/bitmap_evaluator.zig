@@ -1329,3 +1329,30 @@ test "bitmap eval: multi-stratum negation" {
     try std.testing.expect(found_homer);
     try std.testing.expect(found_plato);
 }
+
+test "bitmap eval: binary relation negation" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\wrote("Homer", "The Iliad"). wrote("Homer", "The Odyssey").
+        \\wrote("Virgil", "The Aeneid"). wrote("Plato", "The Republic").
+        \\genre("The Iliad", "epic"). genre("The Odyssey", "epic").
+        \\genre("The Aeneid", "epic"). genre("The Republic", "philosophy").
+        \\non_epic_work(A, B) :- wrote(A, B), not genre(B, "epic").
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    var q_terms = [_]Term{ .{ .variable = "X" }, .{ .variable = "Y" } };
+    const results = try eval.query(.{ .predicate = "non_epic_work", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("Plato", results[0].get("X").?);
+    try std.testing.expectEqualStrings("The Republic", results[0].get("Y").?);
+}
