@@ -158,14 +158,14 @@ pub const BitmapEvaluator = struct {
                 if (rule.body.len == 0) continue;
 
                 if (rule.body.len == 1) {
-                    if (prev_deltas.get(rule.body[0].predicate) != null) {
+                    if (prev_deltas.get(rule.body[0].atom.predicate) != null) {
                         _ = try self.executeSingleAtomRule(rule, &prev_deltas, &deltas);
                     }
                 } else if (rule.body.len == 2) {
-                    if (prev_deltas.get(rule.body[0].predicate) != null) {
+                    if (prev_deltas.get(rule.body[0].atom.predicate) != null) {
                         _ = try self.executeTwoAtomRule(rule, &prev_deltas, &self.relations, &deltas);
                     }
-                    if (prev_deltas.get(rule.body[1].predicate) != null) {
+                    if (prev_deltas.get(rule.body[1].atom.predicate) != null) {
                         _ = try self.executeTwoAtomRule(rule, &self.relations, &prev_deltas, &deltas);
                     }
                 }
@@ -263,7 +263,7 @@ pub const BitmapEvaluator = struct {
         source_rels: *RelationMap,
         deltas: *RelationMap,
     ) !bool {
-        const body_atom = rule.body[0];
+        const body_atom = rule.body[0].atom;
         const head = rule.head;
         const head_arity = head.terms.len;
 
@@ -401,8 +401,8 @@ pub const BitmapEvaluator = struct {
     ) !bool {
         const analysis = analyzeJoin(rule) catch return false;
 
-        const left_ptr = left_source.getPtr(rule.body[0].predicate) orelse return false;
-        const right_ptr = right_source.getPtr(rule.body[1].predicate) orelse return false;
+        const left_ptr = left_source.getPtr(rule.body[0].atom.predicate) orelse return false;
+        const right_ptr = right_source.getPtr(rule.body[1].atom.predicate) orelse return false;
 
         var left = switch (left_ptr.*) {
             .binary => |*b| b,
@@ -414,9 +414,11 @@ pub const BitmapEvaluator = struct {
         };
 
         // Resolve constants in body atoms
+        const left_atom = rule.body[0].atom;
+        const right_atom = rule.body[1].atom;
         var left_bound: [2]?u32 = .{ null, null };
         var right_bound: [2]?u32 = .{ null, null };
-        for (rule.body[0].terms, 0..) |term, i| {
+        for (left_atom.terms, 0..) |term, i| {
             if (i >= 2) break;
             switch (term) {
                 .constant => |c| {
@@ -425,7 +427,7 @@ pub const BitmapEvaluator = struct {
                 .variable => {},
             }
         }
-        for (rule.body[1].terms, 0..) |term, i| {
+        for (right_atom.terms, 0..) |term, i| {
             if (i >= 2) break;
             switch (term) {
                 .constant => |c| {
@@ -590,8 +592,8 @@ pub const BitmapEvaluator = struct {
     fn analyzeJoin(rule: Rule) !JoinAnalysis {
         if (rule.body.len != 2) return error.UnsupportedRule;
 
-        const left = rule.body[0];
-        const right = rule.body[1];
+        const left = rule.body[0].atom;
+        const right = rule.body[1].atom;
 
         var join_var: ?[]const u8 = null;
         var left_pos: u8 = 0;
