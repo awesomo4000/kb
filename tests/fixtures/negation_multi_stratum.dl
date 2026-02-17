@@ -1,0 +1,9 @@
+influenced("Homer", "Virgil").
+influenced("Virgil", "Dante").
+influenced("Virgil", "Milton").
+influenced_t(A, B) :- influenced(A, B).
+influenced_t(A, C) :- influenced(A, B), influenced_t(B, C).
+author("Homer"). author("Virgil"). author("Dante").
+author("Milton"). author("Plato").
+not_in_homeric_tradition(A) :- author(A), not influenced_t("Homer", A).
+?- not_in_homeric_tradition(X).

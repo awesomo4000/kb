@@ -1,0 +1,4 @@
+popular(B) :- book(B), not obscure(B).
+obscure(B) :- book(B), not popular(B).
+book("The Iliad").
+?- popular(X).
