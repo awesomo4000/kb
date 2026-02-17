@@ -96,6 +96,26 @@ correct semantic order within each group. LMDB's `memcmp` gives us all of
 this for free — no custom comparators, no post-sort. This is the same
 approach FoundationDB's tuple layer and CockroachDB's ordered encoding use.
 
+### Entity keys are for identification, not data storage
+
+Entity keys answer "which entity is this?" — they hold short identifiers
+like `"Homer"`, `"doc-42"`, or `10.0.0.1`. They are not for storing long
+text content like descriptions, summaries, or document bodies.
+
+Long text lives in **fact values** — the object side of a triple:
+
+```
+has_summary("doc-42", "This is a 2000-word summary of...")
+description("incident-7", "At 14:32 UTC the server began...")
+```
+
+These go through `Fact.serialize/deserialize`, which already handles
+arbitrary-length strings via u16 length-prefixed fields in the fact record,
+stored in the `facts` LMDB database keyed by compact fact IDs.
+
+The 512-byte stack buffer limit on entity keys is a limit on **identifier
+length**, not on data size. Entity IDs up to ~500 bytes fit comfortably.
+
 ---
 
 ## 3. The Value Type System
