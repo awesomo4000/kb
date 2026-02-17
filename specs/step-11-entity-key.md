@@ -52,7 +52,7 @@ This step solves all three: one module, one encoding, full type support.
 ## 2. Key Format
 
 ```
-[entity_type bytes]\x00[value_type: u8][encoded value]
+[entity_type bytes]\x00[value_type: u8][encoded value bytes to end]
 ```
 
 **Entity type** is always a short ASCII label we control (`"author"`, `"port"`,
@@ -65,22 +65,30 @@ call. For 4-8 byte entity types, this fits in a single SIMD register and
 completes in one comparison cycle on modern hardware.
 
 **value_type** is one byte telling you how to parse everything that follows.
-Fixed-width types (u16, u32, i64, etc.) are self-describing from this tag.
-Variable-width types (string, bytes) use a u16 BE length prefix.
+
+**No length prefixes anywhere.** The value is always the terminal field in
+the key. Fixed-width types (u16, u32, i64, etc.) know their size from the
+type tag via `fixedLen()`. Variable-width types (string, bytes) consume
+everything from the type tag to the end of the key:
+`value_bytes = raw[separator_pos + 2 ..]`. This means:
+
+- Zero overhead for variable-length values
+- Strings sort in pure lexicographic order under `memcmp` (not length-first)
+- Decoding is trivial: find `\x00`, read type tag, rest is the value
 
 **LMDB sort order with this layout:**
 
 ```
-"author" \x00 0x01 [string: "Dante"]
-"author" \x00 0x01 [string: "Homer"]
-"author" \x00 0x01 [string: "Virgil"]
-"book"   \x00 0x01 [string: "Iliad"]
-"book"   \x00 0x01 [string: "Odyssey"]
-"host"   \x00 0x07 [ipv4: 10.0.0.1]
-"host"   \x00 0x07 [ipv4: 192.168.1.1]
-"port"   \x00 0x02 [u16: 22]
-"port"   \x00 0x02 [u16: 80]
-"port"   \x00 0x02 [u16: 443]
+"author" \x00 0x01 "Dante"
+"author" \x00 0x01 "Homer"
+"author" \x00 0x01 "Virgil"
+"book"   \x00 0x01 "Iliad"
+"book"   \x00 0x01 "Odyssey"
+"host"   \x00 0x07 [0A 00 00 01]          -- 10.0.0.1
+"host"   \x00 0x07 [C0 A8 01 01]          -- 192.168.1.1
+"port"   \x00 0x02 [00 50]                -- 80
+"port"   \x00 0x02 [01 BB]                -- 443
+"port"   \x00 0x02 [1F 90]                -- 8080
 ```
 
 Groups by entity type (the semantic concept you'd query on), then values in
@@ -105,7 +113,8 @@ pub const ValueType = enum(u8) {
     bytes    = 0x09,  // arbitrary binary blob
 
     /// Number of bytes the encoded value occupies (excluding the type tag).
-    /// Returns null for variable-length types.
+    /// Returns null for variable-length types (string, bytes) — these
+    /// consume everything to the end of the key.
     pub fn fixedLen(self: ValueType) ?usize {
         return switch (self) {
             .u16_val => 2,
@@ -172,17 +181,22 @@ operator implementation.
 All encodings are chosen so that LMDB's byte-order comparison (`memcmp`)
 produces correct semantic ordering. No custom comparators needed.
 
+**No length prefixes.** The value is always the last field in the key, so
+its length is implicit: fixed-width types know their size from the type tag,
+variable-width types consume everything remaining. This gives strings pure
+lexicographic sort order (not length-first).
+
 | ValueType | Encoding | Bytes | Sort property |
 |---|---|---|---|
-| `string` (0x01) | `[u16 BE len][utf-8 bytes]` | 2 + len | Shorter first, then lexicographic |
-| `u16_val` (0x02) | `[2 bytes BE]` | 2 | Numeric |
-| `u32_val` (0x03) | `[4 bytes BE]` | 4 | Numeric |
-| `i64_val` (0x04) | `[8 bytes BE, sign bit flipped]` | 8 | Numeric (negatives before positives) |
-| `u64_val` (0x05) | `[8 bytes BE]` | 8 | Numeric |
-| `uuid` (0x06) | `[16 bytes raw]` | 16 | Byte order |
-| `ipv4` (0x07) | `[4 bytes BE]` | 4 | Network order |
-| `ipv6` (0x08) | `[16 bytes raw]` | 16 | Byte order |
-| `bytes` (0x09) | `[u16 BE len][raw bytes]` | 2 + len | Shorter first, then byte order |
+| `string` (0x01) | raw UTF-8 bytes | len | Lexicographic |
+| `u16_val` (0x02) | 2 bytes BE | 2 | Numeric |
+| `u32_val` (0x03) | 4 bytes BE | 4 | Numeric |
+| `i64_val` (0x04) | 8 bytes BE, sign bit flipped | 8 | Numeric (neg < pos) |
+| `u64_val` (0x05) | 8 bytes BE | 8 | Numeric |
+| `uuid` (0x06) | 16 bytes raw | 16 | Byte order |
+| `ipv4` (0x07) | 4 bytes BE | 4 | Network order |
+| `ipv6` (0x08) | 16 bytes raw | 16 | Byte order |
+| `bytes` (0x09) | raw bytes | len | Byte order |
 
 **Big-endian integers.** Unsigned integers stored BE sort correctly under
 `memcmp`. `80` as u16 BE is `0x0050`, `443` is `0x01BB`. Byte comparison:
@@ -209,20 +223,39 @@ fn decodeI64(bytes: [8]u8) i64 {
 }
 ```
 
-**Big-endian length prefix for strings.** Shorter strings sort before longer
-strings: `"ab"` (len `0x0002`) before `"abc"` (len `0x0003`). Within the
-same length, sort is lexicographic on the UTF-8 bytes. This gives natural
-sort order in LMDB range scans.
+**Strings: raw bytes, no prefix.** Strings are written directly after the
+type tag with no length prefix. Since the value is always the terminal field,
+length is derived from the key's total size. `memcmp` on the raw UTF-8 bytes
+gives pure lexicographic ordering: `"Amy" < "Homer" < "Jo" < "Virgil"`.
+
+### Decoding logic
+
+```zig
+pub fn fromBytes(raw: []const u8) !EntityKey {
+    const sep = std.mem.indexOfScalar(u8, raw, 0) orelse return error.InvalidKey;
+    if (sep + 1 >= raw.len) return error.InvalidKey;
+    const type_tag: ValueType = @enumFromInt(raw[sep + 1]);
+    const value_bytes = raw[sep + 2 ..];
+
+    // For fixed-width types, validate length matches expected size
+    if (type_tag.fixedLen()) |expected| {
+        if (value_bytes.len != expected) return error.InvalidKey;
+    }
+    // For variable-width types (string, bytes), value_bytes is the entire value
+
+    return EntityKey{ .raw = raw };
+}
+```
 
 ### Example encodings
 
 **`("author", "Homer")` — current common case:**
 ```
-61 75 74 68 6F 72  00  01  00 05  48 6F 6D 65 72
-└── "author" ───┘  ╵   ╵  └len┘  └── "Homer" ──┘
-            null sep  str    5
+61 75 74 68 6F 72  00  01  48 6F 6D 65 72
+└── "author" ───┘  ╵   ╵   └── "Homer" ──┘
+            null sep  str
 ```
-18 bytes vs 13 bytes today. 5 bytes overhead per key.
+13 bytes. Only 1 byte overhead vs today's format (the type tag).
 
 **`("port", 443 as u16)` — future typed ingest:**
 ```
@@ -377,10 +410,10 @@ try by_entity_db.set(key.asBytes(), &fact_id_bytes);
 try fact_edges_db.set(&fact_id_bytes, key.asBytes());
 ```
 
-The heap fallback is eliminated — the new encoding adds at most 3 bytes
-overhead per key (type tag + u16 length), so the 512-byte buffer handles
-entity IDs up to ~500 bytes. If we ever need longer, the `encode` function
-returns `error.BufferTooSmall`.
+The heap fallback is eliminated — the new encoding adds only 1 byte overhead
+per key (the type tag), so the 512-byte buffer handles entity IDs up to ~500
+bytes. If we ever need longer, the `encode` function returns
+`error.BufferTooSmall`.
 
 ### 6c. `fact_store.zig` — `getFactsByEntity()` inline key construction
 
@@ -536,12 +569,16 @@ test "encode/decode bytes roundtrip — with null bytes" {
     try expectEqualSlices(u8, val_with_null, key.value().bytes);
 }
 
-test "string sort order — shorter before longer" {
+test "string sort order — lexicographic" {
     var buf_a: [512]u8 = undefined;
     var buf_b: [512]u8 = undefined;
-    const a = try encodeString(&buf_a, "x", "ab");
-    const b = try encodeString(&buf_b, "x", "abc");
+    var buf_c: [512]u8 = undefined;
+    const a = try encodeString(&buf_a, "x", "Amy");
+    const b = try encodeString(&buf_b, "x", "Homer");
+    const c = try encodeString(&buf_c, "x", "Jo");
+    // Pure lexicographic: Amy < Homer < Jo (not length-first)
     try expect(std.mem.order(u8, a.asBytes(), b.asBytes()) == .lt);
+    try expect(std.mem.order(u8, b.asBytes(), c.asBytes()) == .lt);
 }
 
 test "u16 sort order — numeric" {
@@ -618,7 +655,7 @@ changes. Currently it asserts:
 try expectEqualStrings("author\x00Homer", interner.resolve(id));
 ```
 
-After migration, the interned key includes the type tag and length prefix.
+After migration, the interned key includes the type tag.
 Update to decode through entity_key:
 
 ```zig
@@ -724,7 +761,7 @@ optimization that benefits from the ordering foundation laid here.
 - [ ] `compareValues` does type-aware comparison
 - [ ] i64 sign-bit flip for order-preserving encoding
 - [ ] All fixed-width types (u16, u32, i64, u64, uuid, ipv4, ipv6) encode/decode
-- [ ] Variable-width types (string, bytes) encode with BE u16 length prefix
+- [ ] Variable-width types (string, bytes) consume remaining bytes (no length prefix)
 - [ ] `Entity.toKey` delegates to entity_key (fact.zig)
 - [ ] `Entity.toKeyBuf` added for stack-buffer pattern (fact.zig)
 - [ ] `fact_store.zig` `addFacts` uses entity_key
@@ -732,7 +769,7 @@ optimization that benefits from the ordering foundation laid here.
 - [ ] `bitmap_ingest.zig` `internEntity` uses entity_key
 - [ ] `lib.zig` exports entity_key
 - [ ] Unit tests: roundtrip for every ValueType
-- [ ] Unit tests: sort order (string length, numeric, i64 sign, entity type grouping)
+- [ ] Unit tests: sort order (string lexicographic, numeric, i64 sign, entity type grouping)
 - [ ] Unit tests: buffer overflow returns error
 - [ ] Unit tests: binary safety (null bytes in value)
 - [ ] Unit tests: compareValues same-type and cross-type
