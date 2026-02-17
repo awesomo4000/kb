@@ -22,7 +22,7 @@ pub const Term = union(enum) {
         };
     }
 
-    pub fn format(self: Term, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Term, writer: anytype) !void {
         switch (self) {
             .variable => |v| try writer.print("{s}", .{v}),
             .constant => |c| try writer.print("\"{s}\"", .{c}),
@@ -78,11 +78,11 @@ pub const Atom = struct {
         return h.final();
     }
 
-    pub fn format(self: Atom, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Atom, writer: anytype) !void {
         try writer.print("{s}(", .{self.predicate});
         for (self.terms, 0..) |term, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writer.print("{}", .{term});
+            try writer.print("{f}", .{term});
         }
         try writer.writeAll(")");
     }
@@ -105,26 +105,66 @@ pub const Atom = struct {
     }
 };
 
+pub const BodyElement = union(enum) {
+    atom: Atom,
+    negated_atom: Atom,
+
+    pub fn getAtom(self: BodyElement) Atom {
+        return switch (self) {
+            .atom => |a| a,
+            .negated_atom => |a| a,
+        };
+    }
+
+    pub fn isNegated(self: BodyElement) bool {
+        return self == .negated_atom;
+    }
+
+    pub fn format(self: BodyElement, writer: anytype) !void {
+        switch (self) {
+            .atom => |a| try writer.print("{f}", .{a}),
+            .negated_atom => |a| {
+                try writer.writeAll("not ");
+                try writer.print("{f}", .{a});
+            },
+        }
+    }
+
+    pub fn dupe(self: BodyElement, allocator: Allocator) !BodyElement {
+        return switch (self) {
+            .atom => |a| .{ .atom = try a.dupe(allocator) },
+            .negated_atom => |a| .{ .negated_atom = try a.dupe(allocator) },
+        };
+    }
+
+    pub fn free(self: BodyElement, allocator: Allocator) void {
+        switch (self) {
+            .atom => |a| a.free(allocator),
+            .negated_atom => |a| a.free(allocator),
+        }
+    }
+};
+
 pub const Rule = struct {
     head: Atom,
-    body: []Atom,
+    body: []BodyElement,
 
-    pub fn format(self: Rule, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        try writer.print("{}", .{self.head});
+    pub fn format(self: Rule, writer: anytype) !void {
+        try writer.print("{f}", .{self.head});
         if (self.body.len > 0) {
             try writer.writeAll(" :- ");
-            for (self.body, 0..) |atom, i| {
+            for (self.body, 0..) |elem, i| {
                 if (i > 0) try writer.writeAll(", ");
-                try writer.print("{}", .{atom});
+                try writer.print("{f}", .{elem});
             }
         }
         try writer.writeAll(".");
     }
 
     pub fn dupe(self: Rule, allocator: Allocator) !Rule {
-        const body = try allocator.alloc(Atom, self.body.len);
-        for (self.body, 0..) |a, i| {
-            body[i] = try a.dupe(allocator);
+        const body = try allocator.alloc(BodyElement, self.body.len);
+        for (self.body, 0..) |elem, i| {
+            body[i] = try elem.dupe(allocator);
         }
         return .{
             .head = try self.head.dupe(allocator),
@@ -134,7 +174,7 @@ pub const Rule = struct {
 
     pub fn free(self: Rule, allocator: Allocator) void {
         self.head.free(allocator);
-        for (self.body) |a| a.free(allocator);
+        for (self.body) |elem| elem.free(allocator);
         allocator.free(self.body);
     }
 };
@@ -496,7 +536,7 @@ pub const Parser = struct {
             } else if (self.current.type == .query) {
                 // Query: ?- body.
                 self.advance();
-                const body = try self.parseBody();
+                const body = try self.parseQueryBody();
                 try self.expect(.dot);
                 try queries.append(self.allocator(), body);
             } else {
@@ -534,7 +574,36 @@ pub const Parser = struct {
         return error.ExpectedDotOrTurnstile;
     }
 
-    fn parseBody(self: *Parser) ParseError![]Atom {
+    /// Parse a rule body as []BodyElement (supports `not` for negation).
+    fn parseBody(self: *Parser) ParseError![]BodyElement {
+        var elements: std.ArrayList(BodyElement) = .{};
+
+        const first = try self.parseBodyElement();
+        try elements.append(self.allocator(), first);
+
+        while (self.current.type == .comma) {
+            self.advance();
+            const elem = try self.parseBodyElement();
+            try elements.append(self.allocator(), elem);
+        }
+
+        return elements.toOwnedSlice(self.allocator());
+    }
+
+    /// Parse a single body element: either `not atom(...)` or `atom(...)`.
+    fn parseBodyElement(self: *Parser) ParseError!BodyElement {
+        // Check for `not` contextual keyword
+        if (self.current.type == .identifier and std.mem.eql(u8, self.current.text, "not")) {
+            self.advance();
+            const atom = try self.parseAtom();
+            return .{ .negated_atom = atom };
+        }
+        const atom = try self.parseAtom();
+        return .{ .atom = atom };
+    }
+
+    /// Parse a query body as []Atom (no negation support, used for `?-` lines).
+    fn parseQueryBody(self: *Parser) ParseError![]Atom {
         var atoms: std.ArrayList(Atom) = .{};
 
         const first = try self.parseAtom();
@@ -871,8 +940,8 @@ test "parser rule with body" {
     const rule = result.rules[0];
     try std.testing.expectEqualStrings("grandparent", rule.head.predicate);
     try std.testing.expectEqual(@as(usize, 2), rule.body.len);
-    try std.testing.expectEqualStrings("parent", rule.body[0].predicate);
-    try std.testing.expectEqualStrings("parent", rule.body[1].predicate);
+    try std.testing.expectEqualStrings("parent", rule.body[0].atom.predicate);
+    try std.testing.expectEqualStrings("parent", rule.body[1].atom.predicate);
 }
 
 test "parser query" {
@@ -954,4 +1023,48 @@ test "parser error formatting" {
     try parser.formatError(fbs.writer());
     std.debug.print("{s}", .{fbs.getWritten()});
     std.debug.print("-----------------------------\n", .{});
+}
+
+test "parser negation in rule body" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "non_epic(A) :- author(A), not epic_author(A).");
+    defer parser.deinit();
+
+    const result = try parser.parseProgram();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rules.len);
+    const rule = result.rules[0];
+    try std.testing.expectEqualStrings("non_epic", rule.head.predicate);
+    try std.testing.expectEqual(@as(usize, 2), rule.body.len);
+
+    // First body element: positive atom
+    try std.testing.expect(rule.body[0] == .atom);
+    try std.testing.expectEqualStrings("author", rule.body[0].atom.predicate);
+
+    // Second body element: negated atom
+    try std.testing.expect(rule.body[1] == .negated_atom);
+    try std.testing.expectEqualStrings("epic_author", rule.body[1].negated_atom.predicate);
+    try std.testing.expect(rule.body[1].isNegated());
+    try std.testing.expect(!rule.body[0].isNegated());
+}
+
+test "parser multiple negations in rule body" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "special(A) :- author(A), not epic(A), not modern(A).");
+    defer parser.deinit();
+
+    const result = try parser.parseProgram();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rules.len);
+    const rule = result.rules[0];
+    try std.testing.expectEqual(@as(usize, 3), rule.body.len);
+
+    try std.testing.expect(rule.body[0] == .atom);
+    try std.testing.expectEqualStrings("author", rule.body[0].atom.predicate);
+
+    try std.testing.expect(rule.body[1] == .negated_atom);
+    try std.testing.expectEqualStrings("epic", rule.body[1].negated_atom.predicate);
+
+    try std.testing.expect(rule.body[2] == .negated_atom);
+    try std.testing.expectEqualStrings("modern", rule.body[2].negated_atom.predicate);
 }

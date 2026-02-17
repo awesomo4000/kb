@@ -243,3 +243,70 @@ test "datalog with hypergraph source" {
     try std.testing.expect(found_dante);
     try std.testing.expect(found_milton);
 }
+
+test "datalog negation with hypergraph source" {
+    const allocator = std.testing.allocator;
+    const path = try getTempPath(allocator);
+    defer allocator.free(path);
+    defer std.fs.deleteTreeAbsolute(path) catch {};
+
+    var store = try FactStore.open(allocator, .{ .path = path });
+    defer store.close();
+
+    // Add influence facts: [rel:influenced, author:X, author:Y]
+    _ = try store.addFact(&.{
+        .{ .type = "rel", .id = "influenced" },
+        .{ .type = "author", .id = "Homer" },
+        .{ .type = "author", .id = "Virgil" },
+    }, "test");
+    _ = try store.addFact(&.{
+        .{ .type = "rel", .id = "influenced" },
+        .{ .type = "author", .id = "Virgil" },
+        .{ .type = "author", .id = "Dante" },
+    }, "test");
+    _ = try store.addFact(&.{
+        .{ .type = "rel", .id = "influenced" },
+        .{ .type = "author", .id = "Virgil" },
+        .{ .type = "author", .id = "Milton" },
+    }, "test");
+
+    // Parse rules: transitive influence + negation
+    var parser = datalog.Parser.init(allocator,
+        \\@map influenced(A, B) = [rel:influenced, author:A, author:B].
+        \\
+        \\author("Homer"). author("Virgil"). author("Dante").
+        \\author("Milton"). author("Plato").
+        \\influenced_t(A, B) :- influenced(A, B).
+        \\influenced_t(A, C) :- influenced(A, B), influenced_t(B, C).
+        \\not_in_homeric_tradition(A) :- author(A), not influenced_t("Homer", A).
+    );
+    defer parser.deinit();
+
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+
+    var hg_fetcher = HypergraphFetcher.init(&store);
+    try eval.loadMappedFacts(hg_fetcher.fetcher(), parsed.mappings);
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    // Query: who is not in the Homeric tradition?
+    var q_terms = [_]datalog.Term{.{ .variable = "X" }};
+    const results = try eval.query(.{ .predicate = "not_in_homeric_tradition", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    // Homer (not influenced by himself) and Plato (no influence edge)
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+
+    var found_homer = false;
+    var found_plato = false;
+    for (results) |binding| {
+        const x = binding.get("X").?;
+        if (std.mem.eql(u8, x, "Homer")) found_homer = true;
+        if (std.mem.eql(u8, x, "Plato")) found_plato = true;
+    }
+    try std.testing.expect(found_homer);
+    try std.testing.expect(found_plato);
+}

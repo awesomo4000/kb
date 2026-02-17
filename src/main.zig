@@ -593,7 +593,13 @@ fn cmdDatalog(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Run evaluation
     var timer = try std.time.Timer.start();
-    try eval.evaluate();
+    eval.evaluate() catch |err| {
+        if (err == error.UnstratifiableProgram or err == error.UnsafeNegation) {
+            // Error message already printed by stratify module
+            std.process.exit(1);
+        }
+        return err;
+    };
     const elapsed_ns = timer.read();
 
     if (profile_enabled) {

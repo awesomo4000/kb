@@ -24,6 +24,9 @@ pub const bitmap_ingest = @import("bitmap_ingest.zig");
 // Bitmap evaluator
 pub const bitmap_evaluator = @import("bitmap_evaluator.zig");
 
+// Stratification for negation
+pub const stratify = @import("stratify.zig");
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("datalog.zig");
@@ -32,5 +35,6 @@ test {
     _ = @import("fact_fetcher.zig");
     _ = @import("bitmap_ingest.zig");
     _ = @import("bitmap_evaluator.zig");
+    _ = @import("stratify.zig");
     _ = @import("test_helpers.zig");
 }

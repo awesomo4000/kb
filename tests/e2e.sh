@@ -103,6 +103,31 @@ assert_contains "$OUTPUT" "c" "reachable a->c"
 assert_contains "$OUTPUT" "(2 results)" "2 reachable results"
 rm -f "$PURE_DL"
 
+# Test 5: Negation basic
+echo ""
+echo "--- Test: Negation basic ---"
+OUTPUT=$(cd /tmp && "$KB" datalog "$FIXTURES/negation_basic.dl" 2>&1)
+assert_contains "$OUTPUT" "Plato" "non-epic author is Plato"
+assert_contains "$OUTPUT" "(1 results)" "1 non-epic author"
+
+# Test 6: Negation multi-stratum
+echo ""
+echo "--- Test: Negation multi-stratum ---"
+OUTPUT=$(cd /tmp && "$KB" datalog "$FIXTURES/negation_multi_stratum.dl" 2>&1)
+assert_contains "$OUTPUT" "Homer" "Homer not in own tradition"
+assert_contains "$OUTPUT" "Plato" "Plato not in Homeric tradition"
+assert_contains "$OUTPUT" "(2 results)" "2 authors not in Homeric tradition"
+
+# Test 7: Unstratifiable program
+echo ""
+echo "--- Test: Unstratifiable program ---"
+if (cd /tmp && "$KB" datalog "$FIXTURES/negation_unstratifiable.dl" 2>&1); then
+    echo "  FAIL: expected non-zero exit code"
+    FAILED=1
+else
+    echo "  OK: unstratifiable program rejected"
+fi
+
 # Clean up
 rm -rf "$TEST_DB"
 
