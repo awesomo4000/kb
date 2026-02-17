@@ -19,6 +19,7 @@ const Fact = @import("fact.zig").Fact;
 const Entity = @import("fact.zig").Entity;
 const bitmap_ingest = @import("bitmap_ingest.zig");
 const buildArgPositions = bitmap_ingest.buildArgPositions;
+const stratify_mod = @import("stratify.zig");
 
 const VarRef = struct {
     atom_idx: u8,
@@ -121,7 +122,7 @@ pub const BitmapEvaluator = struct {
         }
     }
 
-    /// Run semi-naive fixpoint evaluation.
+    /// Run stratified semi-naive fixpoint evaluation.
     pub fn evaluate(self: *BitmapEvaluator) !void {
         // Pre-create all head relations to prevent RelationMap resize during execution
         for (self.rules) |rule| {
@@ -129,12 +130,23 @@ pub const BitmapEvaluator = struct {
             _ = try self.ensureRelation(rule.head.predicate, rule.head.terms.len);
         }
 
+        // Stratify rules
+        const strata = try stratify_mod.stratify(self.rules, self.allocator);
+        defer stratify_mod.freeStrata(strata, self.allocator);
+
+        // Evaluate each stratum to fixpoint before moving to the next
+        for (strata) |stratum| {
+            try self.evaluateStratum(stratum.rules);
+        }
+    }
+
+    /// Evaluate a single stratum to fixpoint using semi-naive iteration.
+    fn evaluateStratum(self: *BitmapEvaluator, rules: []const Rule) !void {
         // Phase 1: Initial naive pass
         var deltas: RelationMap = .{};
         defer deinitRelations(&deltas, self.allocator);
 
-        for (self.rules) |rule| {
-            if (rule.body.len == 0) continue;
+        for (rules) |rule| {
             if (rule.body.len == 1) {
                 _ = try self.executeSingleAtomRule(rule, &self.relations, &deltas);
             } else if (rule.body.len == 2) {
@@ -154,9 +166,7 @@ pub const BitmapEvaluator = struct {
             deltas = .{};
             defer deinitRelations(&prev_deltas, self.allocator);
 
-            for (self.rules) |rule| {
-                if (rule.body.len == 0) continue;
-
+            for (rules) |rule| {
                 if (rule.body.len == 1) {
                     if (prev_deltas.get(rule.body[0].atom.predicate) != null) {
                         _ = try self.executeSingleAtomRule(rule, &prev_deltas, &deltas);
