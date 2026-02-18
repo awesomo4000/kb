@@ -57,6 +57,7 @@ pub const Value = union(enum) {
 /// An encoded entity key. Bytes are borrowed — they reference the buffer
 /// passed to encode() or an LMDB value slice passed to fromBytes().
 pub const EntityKey = struct {
+    /// Must be a valid encoded key from `encode()` or `fromBytes()`.
     raw: []const u8,
 
     /// Decode the entity type portion (bytes before the \x00 separator).
@@ -98,6 +99,7 @@ pub const EntityKey = struct {
 
 /// Encode an entity key into the provided buffer.
 pub fn encode(buf: []u8, entity_type: []const u8, val: Value) !EntityKey {
+    if (std.mem.indexOfScalar(u8, entity_type, 0) != null) return error.InvalidEntityType;
     const value_len: usize = switch (val) {
         .string => |s| s.len,
         .u16_val => 2,
@@ -313,6 +315,11 @@ test "compareValues - cross-type returns type tag order" {
     const b = try encode(&buf_b, "x", .{ .u16_val = 42 });
     // string (0x01) < u16 (0x02)
     try expect(compareValues(a, b) == .lt);
+}
+
+test "encode rejects entity type containing null byte" {
+    var buf: [512]u8 = undefined;
+    try expectError(error.InvalidEntityType, encodeString(&buf, "auth\x00or", "Homer"));
 }
 
 test "buffer too small returns error" {

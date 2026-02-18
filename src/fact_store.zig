@@ -8,8 +8,8 @@ const ek = @import("entity_key.zig");
 ///
 /// LMDB databases (all indices use DUPSORT for O(log n) insert):
 /// - facts: fact_id -> packed fact record
-/// - by_entity: "type\x00id" -> fact_id (DUPSORT)
-/// - fact_edges: fact_id -> entity key (DUPSORT)
+/// - by_entity: entity_key -> fact_id (DUPSORT)
+/// - fact_edges: fact_id -> entity_key (DUPSORT)
 /// - entity_list: "type" -> id (DUPSORT)
 pub const FactStore = struct {
     env: lmdb.Environment,
