@@ -1,5 +1,8 @@
 # Step 11: Entity Key Abstraction + Typed Value Encoding
 
+> **STATUS: DONE** — Merged in PR #24 (commit 4767a3a). Includes review fixes:
+> entity type null-byte validation, typed fuzz target, stale comment fix.
+
 Introduces `entity_key.zig` — a single module that owns all entity key
 encoding, decoding, and comparison. Replaces the raw `\x00`-delimited key
 format with a typed, binary-safe, order-preserving encoding. All existing
@@ -660,6 +663,11 @@ test "compareValues — cross-type returns type tag order" {
     try expect(compareValues(a, b) == .lt);
 }
 
+test "encode rejects entity type containing null byte" {
+    var buf: [512]u8 = undefined;
+    try expectError(error.InvalidEntityType, encodeString(&buf, "auth\x00or", "Homer"));
+}
+
 test "buffer too small returns error" {
     var buf: [5]u8 = undefined;
     try expectError(error.BufferTooSmall, encodeString(&buf, "author", "Homer"));
@@ -775,24 +783,24 @@ optimization that benefits from the ordering foundation laid here.
 
 ## 13. Checklist
 
-- [ ] `src/entity_key.zig` created with Value, ValueType, encode, decode
-- [ ] `encodeString` convenience for the string-value case
-- [ ] `fromBytes` finds `\x00` separator, reads type tag, decodes value
-- [ ] `compareValues` does type-aware comparison
-- [ ] i64 sign-bit flip for order-preserving encoding
-- [ ] All fixed-width types (u16, u32, i64, u64, uuid, ipv4, ipv6) encode/decode
-- [ ] Variable-width types (string, bytes) consume remaining bytes (no length prefix)
-- [ ] `Entity.toKey` delegates to entity_key (fact.zig)
-- [ ] `Entity.toKeyBuf` added for stack-buffer pattern (fact.zig)
-- [ ] `fact_store.zig` `addFacts` uses entity_key
-- [ ] `fact_store.zig` `getFactsByEntity` uses entity_key
-- [ ] `bitmap_ingest.zig` `internEntity` uses entity_key
-- [ ] `lib.zig` exports entity_key
-- [ ] Unit tests: roundtrip for every ValueType
-- [ ] Unit tests: sort order (string lexicographic, numeric, i64 sign, entity type grouping)
-- [ ] Unit tests: buffer overflow returns error
-- [ ] Unit tests: binary safety (null bytes in value)
-- [ ] Unit tests: compareValues same-type and cross-type
-- [ ] Existing tests updated for new key format
-- [ ] `zig build test` passes
-- [ ] `zig build test-all` passes
+- [x] `src/entity_key.zig` created with Value, ValueType, encode, decode
+- [x] `encodeString` convenience for the string-value case
+- [x] `fromBytes` finds `\x00` separator, reads type tag, decodes value
+- [x] `compareValues` does type-aware comparison
+- [x] i64 sign-bit flip for order-preserving encoding
+- [x] All fixed-width types (u16, u32, i64, u64, uuid, ipv4, ipv6) encode/decode
+- [x] Variable-width types (string, bytes) consume remaining bytes (no length prefix)
+- [x] `Entity.toKey` delegates to entity_key (fact.zig)
+- [x] `Entity.toKeyBuf` added for stack-buffer pattern (fact.zig)
+- [x] `fact_store.zig` `addFacts` uses entity_key
+- [x] `fact_store.zig` `getFactsByEntity` uses entity_key
+- [x] `bitmap_ingest.zig` `internEntity` uses entity_key
+- [x] `lib.zig` exports entity_key
+- [x] Unit tests: roundtrip for every ValueType
+- [x] Unit tests: sort order (string lexicographic, numeric, i64 sign, entity type grouping)
+- [x] Unit tests: buffer overflow returns error
+- [x] Unit tests: binary safety (null bytes in value)
+- [x] Unit tests: compareValues same-type and cross-type
+- [x] Existing tests updated for new key format
+- [x] `zig build test` passes
+- [x] `zig build test-all` passes
