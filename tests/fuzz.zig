@@ -3,6 +3,7 @@ const kb = @import("kb");
 const Fact = kb.Fact;
 const Entity = kb.Entity;
 const FactStore = kb.FactStore;
+const entity_key = kb.entity_key;
 
 // =============================================================================
 // Fuzz target 1: Fact deserialization
@@ -69,21 +70,85 @@ fn fuzzEntityKey(_: void, input: []const u8) !void {
     const entity_id = input[sep + 1 ..];
 
     var buf: [4096]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const allocator = fba.allocator();
+    const ek = entity_key.encodeString(&buf, entity_type, entity_id) catch return;
 
-    const entity = Entity{ .type = entity_type, .id = entity_id };
-    const key = entity.toKey(allocator) catch return;
-
-    // Verify key format: type + \x00 + id
-    if (key.len != entity_type.len + 1 + entity_id.len) return error.KeyLengthMismatch;
+    // Verify key format: type + \x00 + type_tag + id
+    const key = ek.asBytes();
+    if (key.len != entity_type.len + 1 + 1 + entity_id.len) return error.KeyLengthMismatch;
     if (!std.mem.startsWith(u8, key, entity_type)) return error.KeyTypeMismatch;
     if (key[entity_type.len] != 0) return error.KeySeparatorMismatch;
+    if (key[entity_type.len + 1] != @intFromEnum(entity_key.ValueType.string)) return error.KeyTypeByteMismatch;
     if (!std.mem.endsWith(u8, key, entity_id)) return error.KeyIdMismatch;
+
+    // Verify roundtrip through fromBytes
+    const decoded = entity_key.fromBytes(key) catch return error.DecodeFailure;
+    if (!std.mem.eql(u8, decoded.entityType(), entity_type)) return error.EntityTypeMismatch;
+    if (!std.mem.eql(u8, decoded.value().string, entity_id)) return error.ValueMismatch;
 }
 
 // =============================================================================
-// Fuzz target 3: FactStore operations with arbitrary entities
+// Fuzz target 3: Typed entity key roundtrip
+// =============================================================================
+
+test "fuzz entity key typed" {
+    const corpus = [_][]const u8{
+        "port\x00\x00\x01\xBB", // u16: type_byte % 3 == 0 but sep+1 gives 0x00
+        "host\x00\x01\x0A\x00\x00\x01", // string fallback
+        "val\x00\x02\x00\x2A\x00\x00\x00\x00\x00\x00", // i64
+    };
+
+    try std.testing.fuzz({}, fuzzEntityKeyTyped, .{ .corpus = &corpus });
+}
+
+fn fuzzEntityKeyTyped(_: void, input: []const u8) !void {
+    if (input.len < 3) return;
+    const sep = std.mem.indexOfScalar(u8, input, 0) orelse return;
+    if (sep == 0 or sep >= input.len - 2) return;
+
+    const entity_type = input[0..sep];
+    const type_byte = input[sep + 1];
+    const value_data = input[sep + 2 ..];
+
+    var buf: [4096]u8 = undefined;
+    const val: entity_key.Value = switch (type_byte % 3) {
+        0 => .{ .string = value_data },
+        1 => if (value_data.len >= 2)
+            .{ .u16_val = std.mem.bytesToValue(u16, value_data[0..2]) }
+        else
+            return,
+        2 => if (value_data.len >= 8)
+            .{ .i64_val = @bitCast(std.mem.bytesToValue(u64, value_data[0..8])) }
+        else
+            return,
+        else => unreachable,
+    };
+
+    const ek_result = entity_key.encode(&buf, entity_type, val) catch return;
+    const decoded = entity_key.fromBytes(ek_result.asBytes()) catch return error.DecodeFailure;
+
+    // Verify entity type roundtrips
+    if (!std.mem.eql(u8, decoded.entityType(), entity_type)) return error.EntityTypeMismatch;
+
+    // Verify value type roundtrips
+    if (decoded.valueType() != val.valueType()) return error.ValueTypeMismatch;
+
+    // Verify value roundtrips
+    switch (val) {
+        .string => |s| {
+            if (!std.mem.eql(u8, decoded.value().string, s)) return error.ValueMismatch;
+        },
+        .u16_val => |v| {
+            if (decoded.value().u16_val != v) return error.ValueMismatch;
+        },
+        .i64_val => |v| {
+            if (decoded.value().i64_val != v) return error.ValueMismatch;
+        },
+        else => {},
+    }
+}
+
+// =============================================================================
+// Fuzz target 4: FactStore operations with arbitrary entities
 // NOTE: Disabled for continuous fuzzing - LMDB doesn't play well with fuzzer's
 // process model. Run corpus test only: zig build test-fuzz
 // =============================================================================

@@ -27,6 +27,9 @@ pub const bitmap_evaluator = @import("bitmap_evaluator.zig");
 // Stratification for negation
 pub const stratify = @import("stratify.zig");
 
+// Entity key encoding
+pub const entity_key = @import("entity_key.zig");
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("datalog.zig");
@@ -36,5 +39,6 @@ test {
     _ = @import("bitmap_ingest.zig");
     _ = @import("bitmap_evaluator.zig");
     _ = @import("stratify.zig");
+    _ = @import("entity_key.zig");
     _ = @import("test_helpers.zig");
 }
