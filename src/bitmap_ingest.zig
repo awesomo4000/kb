@@ -2,6 +2,7 @@ const std = @import("std");
 const lmdb = @import("lmdb");
 const rawr = @import("rawr");
 const StringInterner = @import("string_interner.zig").StringInterner;
+const entity_key = @import("entity_key.zig");
 const relation_mod = @import("relation.zig");
 const BinaryRelation = relation_mod.BinaryRelation;
 const UnaryRelation = relation_mod.UnaryRelation;
@@ -97,20 +98,11 @@ pub fn buildArgPositions(mapping: Mapping, allocator: std.mem.Allocator) ![]usiz
     return positions;
 }
 
-/// Intern an entity as "type\x00id".
+/// Intern an entity using the entity_key encoding.
 fn internEntity(interner: *StringInterner, entity: Entity) !u32 {
-    // Build "type\x00id" key using stack buffer for common case
     var buf: [512]u8 = undefined;
-    const total_len = entity.type.len + 1 + entity.id.len;
-    if (total_len > buf.len) {
-        @panic("entity key too long for stack buffer");
-    }
-    @memcpy(buf[0..entity.type.len], entity.type);
-    buf[entity.type.len] = 0;
-    @memcpy(buf[entity.type.len + 1 ..][0..entity.id.len], entity.id);
-    const key = buf[0..total_len];
-
-    return interner.intern(key);
+    const key = try entity_key.encodeString(&buf, entity.type, entity.id);
+    return interner.intern(key.asBytes());
 }
 
 // =============================================================================
@@ -197,12 +189,17 @@ test "internEntity uses type-null-id format" {
     defer interner.deinit();
 
     const id = try internEntity(&interner, Entity{ .type = "author", .id = "Homer" });
-    try std.testing.expectEqualStrings("author\x00Homer", interner.resolve(id));
+    const resolved = interner.resolve(id);
+    const decoded = try entity_key.fromBytes(resolved);
+    try std.testing.expectEqualStrings("author", decoded.entityType());
+    try std.testing.expectEqualStrings("Homer", decoded.value().string);
 
     // Different type, same id -> different intern ID
     const id2 = try internEntity(&interner, Entity{ .type = "book", .id = "Homer" });
     try std.testing.expect(id != id2);
-    try std.testing.expectEqualStrings("book\x00Homer", interner.resolve(id2));
+    const decoded2 = try entity_key.fromBytes(interner.resolve(id2));
+    try std.testing.expectEqualStrings("book", decoded2.entityType());
+    try std.testing.expectEqualStrings("Homer", decoded2.value().string);
 }
 
 test "ingest builds binary relation from mock facts" {
@@ -257,9 +254,12 @@ test "ingest builds binary relation from mock facts" {
     try std.testing.expectEqual(@as(u64, 2), bin_mut.tupleCount());
 
     // Verify specific tuples via interner
-    const virgil_id = interner.lookup("author\x00Virgil").?;
-    const homer_id = interner.lookup("author\x00Homer").?;
-    const dante_id = interner.lookup("author\x00Dante").?;
+    var kb1: [512]u8 = undefined;
+    var kb2: [512]u8 = undefined;
+    var kb3: [512]u8 = undefined;
+    const virgil_id = interner.lookup((try entity_key.encodeString(&kb1, "author", "Virgil")).asBytes()).?;
+    const homer_id = interner.lookup((try entity_key.encodeString(&kb2, "author", "Homer")).asBytes()).?;
+    const dante_id = interner.lookup((try entity_key.encodeString(&kb3, "author", "Dante")).asBytes()).?;
 
     const bin = relations.get("influenced_by").?.binary;
     try std.testing.expect(bin.contains(virgil_id, homer_id));
@@ -323,8 +323,10 @@ test "ingest handles multiple mappings" {
     try std.testing.expect(relations.get("wrote") != null);
 
     // "wrote" should have (Homer, Iliad) -- note different entity types
-    const homer_id = interner.lookup("author\x00Homer").?;
-    const iliad_id = interner.lookup("book\x00Iliad").?;
+    var kb1: [512]u8 = undefined;
+    var kb2: [512]u8 = undefined;
+    const homer_id = interner.lookup((try entity_key.encodeString(&kb1, "author", "Homer")).asBytes()).?;
+    const iliad_id = interner.lookup((try entity_key.encodeString(&kb2, "book", "Iliad")).asBytes()).?;
     try std.testing.expect(relations.get("wrote").?.binary.contains(homer_id, iliad_id));
 }
 
@@ -412,8 +414,10 @@ test "full ingest-persist-load roundtrip" {
         defer deinitRelations(&relations, allocator);
 
         // Interner should have the entities
-        const homer_id = interner.lookup("author\x00Homer").?;
-        const iliad_id = interner.lookup("book\x00Iliad").?;
+        var kb1: [512]u8 = undefined;
+        var kb2: [512]u8 = undefined;
+        const homer_id = interner.lookup((try entity_key.encodeString(&kb1, "author", "Homer")).asBytes()).?;
+        const iliad_id = interner.lookup((try entity_key.encodeString(&kb2, "book", "Iliad")).asBytes()).?;
 
         // Relation should have the tuple
         const rel = relations.get("wrote") orelse return error.RelationNotFound;

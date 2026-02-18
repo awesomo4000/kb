@@ -2,6 +2,7 @@ const std = @import("std");
 const lmdb = @import("lmdb");
 const Fact = @import("fact.zig").Fact;
 const Entity = @import("fact.zig").Entity;
+const ek = @import("entity_key.zig");
 
 /// Hypergraph fact store backed by LMDB.
 ///
@@ -103,28 +104,14 @@ pub const FactStore = struct {
 
             // Index by each entity - DUPSORT means set() adds a value, doesn't replace
             for (input.entities) |entity| {
-                // Stack buffer for entity key
                 var key_buf: [512]u8 = undefined;
-                const entity_key = blk: {
-                    const total_len = entity.type.len + 1 + entity.id.len;
-                    if (total_len <= key_buf.len) {
-                        @memcpy(key_buf[0..entity.type.len], entity.type);
-                        key_buf[entity.type.len] = 0;
-                        @memcpy(key_buf[entity.type.len + 1 ..][0..entity.id.len], entity.id);
-                        break :blk key_buf[0..total_len];
-                    } else {
-                        // Extremely long key - fall back to heap (rare)
-                        var arena = std.heap.ArenaAllocator.init(self.allocator);
-                        defer arena.deinit();
-                        break :blk try entity.toKey(arena.allocator());
-                    }
-                };
+                const key = try ek.encodeString(&key_buf, entity.type, entity.id);
 
                 // Add fact_id to by_entity index (DUPSORT: adds to existing key)
-                try by_entity_db.set(entity_key, &fact_id_bytes);
+                try by_entity_db.set(key.asBytes(), &fact_id_bytes);
 
                 // Add entity_key to fact_edges (DUPSORT: adds to existing key)
-                try fact_edges_db.set(&fact_id_bytes, entity_key);
+                try fact_edges_db.set(&fact_id_bytes, key.asBytes());
 
                 // Add entity id to entity_list (DUPSORT: adds to existing key)
                 try entity_list_db.set(entity.type, entity.id);
@@ -155,19 +142,7 @@ pub const FactStore = struct {
 
         // Build entity key
         var key_buf: [512]u8 = undefined;
-        const entity_key = blk: {
-            const total_len = entity.type.len + 1 + entity.id.len;
-            if (total_len <= key_buf.len) {
-                @memcpy(key_buf[0..entity.type.len], entity.type);
-                key_buf[entity.type.len] = 0;
-                @memcpy(key_buf[entity.type.len + 1 ..][0..entity.id.len], entity.id);
-                break :blk key_buf[0..total_len];
-            } else {
-                const tmp_key = try entity.toKey(allocator);
-                defer allocator.free(tmp_key);
-                break :blk tmp_key;
-            }
-        };
+        const key = try ek.encodeString(&key_buf, entity.type, entity.id);
 
         // Use cursor to iterate all values for this key
         var cursor = try by_entity_db.cursor();
@@ -177,7 +152,7 @@ pub const FactStore = struct {
         errdefer ids.deinit(allocator);
 
         // Seek to key, get first value
-        var value = try cursor.goToKeyValue(entity_key);
+        var value = try cursor.goToKeyValue(key.asBytes());
         while (value) |v| {
             if (v.len == 8) {
                 try ids.append(allocator, decodeU64(v));
@@ -259,7 +234,9 @@ test "entity key encoding" {
     const entity = Entity{ .type = "author", .id = "homer" };
     const key = try entity.toKey(allocator);
     defer allocator.free(key);
-    try std.testing.expectEqualStrings("author\x00homer", key);
+    const decoded = try ek.fromBytes(key);
+    try std.testing.expectEqualStrings("author", decoded.entityType());
+    try std.testing.expectEqualStrings("homer", decoded.value().string);
 }
 
 test "u64 encoding roundtrip" {

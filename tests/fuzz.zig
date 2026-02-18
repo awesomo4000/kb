@@ -3,6 +3,7 @@ const kb = @import("kb");
 const Fact = kb.Fact;
 const Entity = kb.Entity;
 const FactStore = kb.FactStore;
+const entity_key = kb.entity_key;
 
 // =============================================================================
 // Fuzz target 1: Fact deserialization
@@ -69,17 +70,20 @@ fn fuzzEntityKey(_: void, input: []const u8) !void {
     const entity_id = input[sep + 1 ..];
 
     var buf: [4096]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const allocator = fba.allocator();
+    const ek = entity_key.encodeString(&buf, entity_type, entity_id) catch return;
 
-    const entity = Entity{ .type = entity_type, .id = entity_id };
-    const key = entity.toKey(allocator) catch return;
-
-    // Verify key format: type + \x00 + id
-    if (key.len != entity_type.len + 1 + entity_id.len) return error.KeyLengthMismatch;
+    // Verify key format: type + \x00 + type_tag + id
+    const key = ek.asBytes();
+    if (key.len != entity_type.len + 1 + 1 + entity_id.len) return error.KeyLengthMismatch;
     if (!std.mem.startsWith(u8, key, entity_type)) return error.KeyTypeMismatch;
     if (key[entity_type.len] != 0) return error.KeySeparatorMismatch;
+    if (key[entity_type.len + 1] != @intFromEnum(entity_key.ValueType.string)) return error.KeyTypeByteMismatch;
     if (!std.mem.endsWith(u8, key, entity_id)) return error.KeyIdMismatch;
+
+    // Verify roundtrip through fromBytes
+    const decoded = entity_key.fromBytes(key) catch return error.DecodeFailure;
+    if (!std.mem.eql(u8, decoded.entityType(), entity_type)) return error.EntityTypeMismatch;
+    if (!std.mem.eql(u8, decoded.value().string, entity_id)) return error.ValueMismatch;
 }
 
 // =============================================================================

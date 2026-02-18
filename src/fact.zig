@@ -1,4 +1,5 @@
 const std = @import("std");
+const entity_key_mod = @import("entity_key.zig");
 
 /// An entity is a typed value: "host:10.2.3.12", "port:8080", etc.
 pub const Entity = struct {
@@ -9,13 +10,16 @@ pub const Entity = struct {
         return std.mem.eql(u8, self.type, other.type) and std.mem.eql(u8, self.id, other.id);
     }
 
-    /// Create "type\x00id" key for indexing
+    /// Create encoded entity key for indexing. Caller owns returned slice.
     pub fn toKey(self: Entity, allocator: std.mem.Allocator) ![]u8 {
-        const key = try allocator.alloc(u8, self.type.len + 1 + self.id.len);
-        @memcpy(key[0..self.type.len], self.type);
-        key[self.type.len] = 0;
-        @memcpy(key[self.type.len + 1 ..], self.id);
-        return key;
+        var buf: [512]u8 = undefined;
+        const ek = try entity_key_mod.encodeString(&buf, self.type, self.id);
+        return allocator.dupe(u8, ek.asBytes());
+    }
+
+    /// Encode entity key into the provided buffer (no allocation).
+    pub fn toKeyBuf(self: Entity, buf: []u8) !entity_key_mod.EntityKey {
+        return entity_key_mod.encodeString(buf, self.type, self.id);
     }
 };
 
@@ -154,7 +158,9 @@ test "entity toKey" {
     const entity = Entity{ .type = "author", .id = "homer" };
     const key = try entity.toKey(allocator);
     defer allocator.free(key);
-    try std.testing.expectEqualStrings("author\x00homer", key);
+    const decoded = try entity_key_mod.fromBytes(key);
+    try std.testing.expectEqualStrings("author", decoded.entityType());
+    try std.testing.expectEqualStrings("homer", decoded.value().string);
 }
 
 test "fact serialize/deserialize roundtrip" {
