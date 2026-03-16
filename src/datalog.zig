@@ -9,6 +9,8 @@ pub const BodyElement = ast.BodyElement;
 pub const Rule = ast.Rule;
 pub const Mapping = ast.Mapping;
 pub const Binding = ast.Binding;
+pub const CompOp = ast.CompOp;
+pub const Comparison = ast.Comparison;
 
 // =============================================================================
 // Lexer
@@ -25,6 +27,11 @@ pub const TokenType = enum {
     dot, // .
     colon, // :
     equals, // =
+    not_equal, // !=
+    less_than, // <
+    greater_than, // >
+    less_eq, // <=
+    greater_eq, // >=
     at, // @
     turnstile, // :-
     query, // ?-
@@ -69,6 +76,34 @@ pub const Lexer = struct {
         if (c == '.') return self.advance(.dot);
         if (c == '=') return self.advance(.equals);
         if (c == '@') return self.advance(.at);
+
+        // Comparison operators: !=, <, <=, >, >=
+        if (c == '!') {
+            if (self.peek(1) == '=') {
+                self.pos += 2;
+                self.col += 2;
+                return .{ .type = .not_equal, .text = "!=", .line = self.line, .col = start_col };
+            }
+            self.pos += 1;
+            self.col += 1;
+            return .{ .type = .err, .text = self.source[start..self.pos], .line = self.line, .col = start_col };
+        }
+        if (c == '<') {
+            if (self.peek(1) == '=') {
+                self.pos += 2;
+                self.col += 2;
+                return .{ .type = .less_eq, .text = "<=", .line = self.line, .col = start_col };
+            }
+            return self.advance(.less_than);
+        }
+        if (c == '>') {
+            if (self.peek(1) == '=') {
+                self.pos += 2;
+                self.col += 2;
+                return .{ .type = .greater_eq, .text = ">=", .line = self.line, .col = start_col };
+            }
+            return self.advance(.greater_than);
+        }
 
         // :- turnstile or just :
         if (c == ':') {
@@ -396,7 +431,7 @@ pub const Parser = struct {
         return elements.toOwnedSlice(self.allocator());
     }
 
-    /// Parse a single body element: either `not atom(...)` or `atom(...)`.
+    /// Parse a single body element: `not atom(...)`, `atom(...)`, or `term op term`.
     fn parseBodyElement(self: *Parser) ParseError!BodyElement {
         // Check for `not` contextual keyword
         if (self.current.type == .identifier and std.mem.eql(u8, self.current.text, "not")) {
@@ -404,8 +439,61 @@ pub const Parser = struct {
             const atom = try self.parseAtom();
             return .{ .negated_atom = atom };
         }
+
+        // Check for comparison: term op term
+        // A comparison starts with an identifier or string, followed by a comparison operator.
+        if (self.current.type == .identifier or self.current.type == .string) {
+            const peek_type = self.peekNextType();
+            if (isComparisonOp(peek_type)) {
+                const left = try self.parseTerm();
+                const op = self.parseCompOp();
+                const right = try self.parseTerm();
+                return .{ .comparison = .{ .left = left, .op = op, .right = right } };
+            }
+        }
+
         const atom = try self.parseAtom();
         return .{ .atom = atom };
+    }
+
+    /// Peek at the next token type without consuming it.
+    fn peekNextType(self: *Parser) TokenType {
+        // Save lexer state
+        const saved_pos = self.lexer.pos;
+        const saved_line = self.lexer.line;
+        const saved_col = self.lexer.col;
+
+        // Advance lexer to get next token
+        const next_tok = self.lexer.next();
+        const result = next_tok.type;
+
+        // Restore lexer state
+        self.lexer.pos = saved_pos;
+        self.lexer.line = saved_line;
+        self.lexer.col = saved_col;
+
+        return result;
+    }
+
+    fn isComparisonOp(tt: TokenType) bool {
+        return switch (tt) {
+            .equals, .not_equal, .less_than, .greater_than, .less_eq, .greater_eq => true,
+            else => false,
+        };
+    }
+
+    fn parseCompOp(self: *Parser) CompOp {
+        const op: CompOp = switch (self.current.type) {
+            .equals => .eq,
+            .not_equal => .neq,
+            .less_than => .lt,
+            .greater_than => .gt,
+            .less_eq => .le,
+            .greater_eq => .ge,
+            else => unreachable,
+        };
+        self.advance();
+        return op;
     }
 
     /// Parse a query body as []Atom (no negation support, used for `?-` lines).
@@ -944,4 +1032,109 @@ test "parser underscore prefix identifiers are not wildcards" {
     const term = result.rules[0].head.terms[0];
     try std.testing.expect(term == .constant);
     try std.testing.expectEqualStrings("_bar", term.constant);
+}
+
+// =============================================================================
+// Comparison operator tests
+// =============================================================================
+
+test "lexer comparison operators" {
+    // Test all 6 operators
+    var lexer = Lexer.init("= != < > <= >=");
+
+    try std.testing.expectEqual(TokenType.equals, lexer.next().type);
+    try std.testing.expectEqual(TokenType.not_equal, lexer.next().type);
+    try std.testing.expectEqual(TokenType.less_than, lexer.next().type);
+    try std.testing.expectEqual(TokenType.greater_than, lexer.next().type);
+    try std.testing.expectEqual(TokenType.less_eq, lexer.next().type);
+    try std.testing.expectEqual(TokenType.greater_eq, lexer.next().type);
+    try std.testing.expectEqual(TokenType.eof, lexer.next().type);
+}
+
+test "lexer not_equal text" {
+    var lexer = Lexer.init("!=");
+    const tok = lexer.next();
+    try std.testing.expectEqual(TokenType.not_equal, tok.type);
+    try std.testing.expectEqualStrings("!=", tok.text);
+}
+
+test "lexer bare bang is error" {
+    var lexer = Lexer.init("! ");
+    const tok = lexer.next();
+    try std.testing.expectEqual(TokenType.err, tok.type);
+}
+
+test "parser comparison in rule body" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "old(X) :- age(X, A), A > \"50\".");
+    defer parser.deinit();
+
+    const result = try parser.parseProgram();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rules.len);
+    const rule = result.rules[0];
+    try std.testing.expectEqual(@as(usize, 2), rule.body.len);
+
+    // First body element: positive atom
+    try std.testing.expect(rule.body[0] == .atom);
+    try std.testing.expectEqualStrings("age", rule.body[0].atom.predicate);
+
+    // Second body element: comparison
+    try std.testing.expect(rule.body[1] == .comparison);
+    const cmp = rule.body[1].comparison;
+    try std.testing.expect(cmp.left == .variable);
+    try std.testing.expectEqualStrings("A", cmp.left.variable);
+    try std.testing.expectEqual(CompOp.gt, cmp.op);
+    try std.testing.expect(cmp.right == .constant);
+    try std.testing.expectEqualStrings("50", cmp.right.constant);
+}
+
+test "parser chained comparisons" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "range(X) :- val(X, V), V >= \"10\", V < \"20\".");
+    defer parser.deinit();
+
+    const result = try parser.parseProgram();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rules.len);
+    const rule = result.rules[0];
+    try std.testing.expectEqual(@as(usize, 3), rule.body.len);
+
+    try std.testing.expect(rule.body[0] == .atom);
+    try std.testing.expect(rule.body[1] == .comparison);
+    try std.testing.expect(rule.body[2] == .comparison);
+
+    try std.testing.expectEqual(CompOp.ge, rule.body[1].comparison.op);
+    try std.testing.expectEqual(CompOp.lt, rule.body[2].comparison.op);
+}
+
+test "parser equality disambiguation" {
+    // X = "foo" should parse as comparison, not as @map equals
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "match(X) :- val(X, V), V = \"hello\".");
+    defer parser.deinit();
+
+    const result = try parser.parseProgram();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rules.len);
+    const rule = result.rules[0];
+    try std.testing.expectEqual(@as(usize, 2), rule.body.len);
+
+    try std.testing.expect(rule.body[1] == .comparison);
+    try std.testing.expectEqual(CompOp.eq, rule.body[1].comparison.op);
+}
+
+test "parser not-equal comparison" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "diff(X, Y) :- pair(X, Y), X != Y.");
+    defer parser.deinit();
+
+    const result = try parser.parseProgram();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rules.len);
+    const rule = result.rules[0];
+    try std.testing.expectEqual(@as(usize, 2), rule.body.len);
+
+    try std.testing.expect(rule.body[1] == .comparison);
+    try std.testing.expectEqual(CompOp.neq, rule.body[1].comparison.op);
 }

@@ -21,6 +21,8 @@ const bitmap_ingest = @import("bitmap_ingest.zig");
 const buildArgPositions = bitmap_ingest.buildArgPositions;
 const stratify_mod = @import("stratify.zig");
 const BodyElement = datalog.BodyElement;
+const CompOp = datalog.CompOp;
+const Comparison = datalog.Comparison;
 
 const VarRef = struct {
     atom_idx: u8,
@@ -224,7 +226,10 @@ pub const BitmapEvaluator = struct {
     fn countPositiveAtoms(body: []const BodyElement) usize {
         var count: usize = 0;
         for (body) |elem| {
-            if (elem == .atom) count += 1;
+            switch (elem) {
+                .atom => count += 1,
+                .negated_atom, .comparison => {},
+            }
         }
         return count;
     }
@@ -233,9 +238,12 @@ pub const BitmapEvaluator = struct {
     fn getPositiveAtom(body: []const BodyElement, n: usize) Atom {
         var count: usize = 0;
         for (body) |elem| {
-            if (elem == .atom) {
-                if (count == n) return elem.atom;
-                count += 1;
+            switch (elem) {
+                .atom => |a| {
+                    if (count == n) return a;
+                    count += 1;
+                },
+                .negated_atom, .comparison => {},
             }
         }
         unreachable;
@@ -275,29 +283,96 @@ pub const BitmapEvaluator = struct {
         };
     }
 
-    /// Check all negated atoms in a rule body against current variable bindings.
-    /// Returns true if ALL negations pass (none of the negated atoms are found).
-    fn checkAllNegations(
+    /// Check all negated atoms and comparisons in a rule body against current variable bindings.
+    /// Returns true if ALL filters pass (negations hold and comparisons are satisfied).
+    fn checkAllFilters(
         self: *BitmapEvaluator,
         body: []const BodyElement,
         var_bindings: *const std.StringHashMapUnmanaged(u32),
     ) bool {
         for (body) |elem| {
-            if (elem == .negated_atom) {
-                if (!self.checkNegation(elem.negated_atom, var_bindings)) {
-                    return false;
-                }
+            switch (elem) {
+                .negated_atom => |na| {
+                    if (!self.checkNegation(na, var_bindings)) {
+                        return false;
+                    }
+                },
+                .comparison => |cmp| {
+                    if (!self.checkComparison(cmp, var_bindings)) {
+                        return false;
+                    }
+                },
+                .atom => {},
             }
         }
         return true;
     }
 
-    /// Check if a rule body has any negated atoms.
-    fn hasNegatedAtoms(body: []const BodyElement) bool {
+    /// Check if a rule body has any negated atoms or comparisons.
+    fn hasFilters(body: []const BodyElement) bool {
         for (body) |elem| {
-            if (elem == .negated_atom) return true;
+            switch (elem) {
+                .negated_atom, .comparison => return true,
+                .atom => {},
+            }
         }
         return false;
+    }
+
+    /// Resolve a term to its string value given variable bindings.
+    fn resolveTermToString(
+        self: *BitmapEvaluator,
+        term: Term,
+        var_bindings: *const std.StringHashMapUnmanaged(u32),
+    ) ?[]const u8 {
+        return switch (term) {
+            .constant => |c| c,
+            .variable => |v| blk: {
+                const id = var_bindings.get(v) orelse return null;
+                break :blk self.interner.resolve(id);
+            },
+        };
+    }
+
+    /// Compare two string values using the given comparison operator.
+    /// If both parse as i64, compare numerically; otherwise compare lexicographically.
+    fn numericOrStringCompare(left: []const u8, right: []const u8, op: CompOp) bool {
+        const left_int = std.fmt.parseInt(i64, left, 10) catch null;
+        const right_int = std.fmt.parseInt(i64, right, 10) catch null;
+
+        if (left_int != null and right_int != null) {
+            const l = left_int.?;
+            const r = right_int.?;
+            return switch (op) {
+                .eq => l == r,
+                .neq => l != r,
+                .lt => l < r,
+                .gt => l > r,
+                .le => l <= r,
+                .ge => l >= r,
+            };
+        }
+
+        const order = std.mem.order(u8, left, right);
+        return switch (op) {
+            .eq => order == .eq,
+            .neq => order != .eq,
+            .lt => order == .lt,
+            .gt => order == .gt,
+            .le => order != .gt,
+            .ge => order != .lt,
+        };
+    }
+
+    /// Check a comparison against current variable bindings.
+    fn checkComparison(
+        self: *BitmapEvaluator,
+        cmp: Comparison,
+        var_bindings: *const std.StringHashMapUnmanaged(u32),
+    ) bool {
+        const left_str = self.resolveTermToString(cmp.left, var_bindings) orelse return false;
+        const right_str = self.resolveTermToString(cmp.right, var_bindings) orelse return false;
+        return numericOrStringCompare(left_str, right_str, cmp.op);
     }
 
     // =========================================================================
@@ -366,7 +441,7 @@ pub const BitmapEvaluator = struct {
         const body_atom = getPositiveAtom(rule.body, 0);
         const head = rule.head;
         const head_arity = head.terms.len;
-        const has_negation = hasNegatedAtoms(rule.body);
+        const has_filters = hasFilters(rule.body);
 
         const source_ptr = source_rels.getPtr(body_atom.predicate) orelse return false;
 
@@ -428,9 +503,9 @@ pub const BitmapEvaluator = struct {
             .binary => |*source| {
                 if (body_bound[0] != null and body_bound[1] != null) {
                     if (source.contains(body_bound[0].?, body_bound[1].?)) {
-                        if (has_negation) {
+                        if (has_filters) {
                             self.buildVarBindingsFromAtom(body_atom, .{ body_bound[0].?, body_bound[1].? }, &var_bindings);
-                            if (!self.checkAllNegations(rule.body, &var_bindings)) return false;
+                            if (!self.checkAllFilters(rule.body, &var_bindings)) return false;
                         }
                         const hv = self.computeHeadVals(head, head_from_body, .{ body_bound[0].?, body_bound[1].? }) catch return false;
                         if (!self.targetContains(head.predicate, head_arity, hv)) {
@@ -442,9 +517,9 @@ pub const BitmapEvaluator = struct {
                     var iter = fwd.iterator();
                     while (iter.next()) |b_val| {
                         if (same_var and c0 != b_val) continue;
-                        if (has_negation) {
+                        if (has_filters) {
                             self.buildVarBindingsFromAtom(body_atom, .{ c0, b_val }, &var_bindings);
-                            if (!self.checkAllNegations(rule.body, &var_bindings)) continue;
+                            if (!self.checkAllFilters(rule.body, &var_bindings)) continue;
                         }
                         const hv = self.computeHeadVals(head, head_from_body, .{ c0, b_val }) catch continue;
                         if (!self.targetContains(head.predicate, head_arity, hv)) {
@@ -456,9 +531,9 @@ pub const BitmapEvaluator = struct {
                     var iter = rev.iterator();
                     while (iter.next()) |a_val| {
                         if (same_var and a_val != c1) continue;
-                        if (has_negation) {
+                        if (has_filters) {
                             self.buildVarBindingsFromAtom(body_atom, .{ a_val, c1 }, &var_bindings);
-                            if (!self.checkAllNegations(rule.body, &var_bindings)) continue;
+                            if (!self.checkAllFilters(rule.body, &var_bindings)) continue;
                         }
                         const hv = self.computeHeadVals(head, head_from_body, .{ a_val, c1 }) catch continue;
                         if (!self.targetContains(head.predicate, head_arity, hv)) {
@@ -472,9 +547,9 @@ pub const BitmapEvaluator = struct {
                         var b_iter = fwd.iterator();
                         while (b_iter.next()) |b_val| {
                             if (same_var and a_val != b_val) continue;
-                            if (has_negation) {
+                            if (has_filters) {
                                 self.buildVarBindingsFromAtom(body_atom, .{ a_val, b_val }, &var_bindings);
-                                if (!self.checkAllNegations(rule.body, &var_bindings)) continue;
+                                if (!self.checkAllFilters(rule.body, &var_bindings)) continue;
                             }
                             const hv = self.computeHeadVals(head, head_from_body, .{ a_val, b_val }) catch continue;
                             if (!self.targetContains(head.predicate, head_arity, hv)) {
@@ -490,9 +565,9 @@ pub const BitmapEvaluator = struct {
                     .variable => {
                         var iter = source.members.iterator();
                         while (iter.next()) |val| {
-                            if (has_negation) {
+                            if (has_filters) {
                                 self.buildVarBindingsFromAtom(body_atom, .{ val, 0 }, &var_bindings);
-                                if (!self.checkAllNegations(rule.body, &var_bindings)) continue;
+                                if (!self.checkAllFilters(rule.body, &var_bindings)) continue;
                             }
                             const hv = self.computeHeadVals(head, head_from_body, .{ val, 0 }) catch continue;
                             if (!self.targetContains(head.predicate, head_arity, hv)) {
@@ -544,7 +619,7 @@ pub const BitmapEvaluator = struct {
         const pos0 = getPositiveAtom(rule.body, 0);
         const pos1 = getPositiveAtom(rule.body, 1);
         const analysis = analyzeJoinAtoms(pos0, pos1, rule.head) catch return false;
-        const has_negation = hasNegatedAtoms(rule.body);
+        const has_filters = hasFilters(rule.body);
 
         const left_ptr = left_source.getPtr(pos0.predicate) orelse return false;
         const right_ptr = right_source.getPtr(pos1.predicate) orelse return false;
@@ -650,7 +725,7 @@ pub const BitmapEvaluator = struct {
                     }
 
                     // Check negations if present
-                    if (has_negation) {
+                    if (has_filters) {
                         // Build var bindings from both positive atoms
                         var left_vals: [2]u32 = undefined;
                         var right_vals: [2]u32 = undefined;
@@ -674,7 +749,7 @@ pub const BitmapEvaluator = struct {
                                 .constant => {},
                             }
                         }
-                        if (!self.checkAllNegations(rule.body, &var_bindings)) continue;
+                        if (!self.checkAllFilters(rule.body, &var_bindings)) continue;
                     }
 
                     var head_vals: [2]u32 = .{ 0, 0 };
@@ -1421,4 +1496,155 @@ test "bitmap eval: multiple independent wildcards" {
 
     // a->b and c->a, b->c and a->b, c->a and b->c -- all three nodes qualify
     try std.testing.expectEqual(@as(usize, 3), results.len);
+}
+
+// =============================================================================
+// Comparison operator evaluator tests
+// =============================================================================
+
+test "bitmap eval: numeric greater-than comparison" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\score("alice", "90"). score("bob", "40"). score("carol", "75").
+        \\high_score(X) :- score(X, S), S > "50".
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    var q_terms = [_]Term{.{ .variable = "X" }};
+    const results = try eval.query(.{ .predicate = "high_score", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    var found_alice = false;
+    var found_carol = false;
+    for (results) |r| {
+        const x = r.get("X").?;
+        if (std.mem.eql(u8, x, "alice")) found_alice = true;
+        if (std.mem.eql(u8, x, "carol")) found_carol = true;
+    }
+    try std.testing.expect(found_alice);
+    try std.testing.expect(found_carol);
+}
+
+test "bitmap eval: equality comparison" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\color("red"). color("blue"). color("green").
+        \\is_blue(X) :- color(X), X = "blue".
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    var q_terms = [_]Term{.{ .variable = "X" }};
+    const results = try eval.query(.{ .predicate = "is_blue", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("blue", results[0].get("X").?);
+}
+
+test "bitmap eval: not-equal comparison" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\color("red"). color("blue"). color("green").
+        \\not_blue(X) :- color(X), X != "blue".
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    var q_terms = [_]Term{.{ .variable = "X" }};
+    const results = try eval.query(.{ .predicate = "not_blue", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+}
+
+test "bitmap eval: chained range comparison" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\val("5"). val("10"). val("15"). val("20"). val("25").
+        \\in_range(X) :- val(X), X >= "10", X < "25".
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    var q_terms = [_]Term{.{ .variable = "X" }};
+    const results = try eval.query(.{ .predicate = "in_range", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    // 10, 15, 20 are in range [10, 25)
+    try std.testing.expectEqual(@as(usize, 3), results.len);
+}
+
+test "bitmap eval: comparison combined with negation" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\score("alice", "90"). score("bob", "40"). score("carol", "75").
+        \\banned("carol").
+        \\eligible(X) :- score(X, S), S > "50", not banned(X).
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    var q_terms = [_]Term{.{ .variable = "X" }};
+    const results = try eval.query(.{ .predicate = "eligible", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    // alice scores > 50 and is not banned; carol scores > 50 but is banned
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("alice", results[0].get("X").?);
+}
+
+test "bitmap eval: string fallback comparison" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\word("apple"). word("banana"). word("cherry").
+        \\before_c(X) :- word(X), X < "cherry".
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    var q_terms = [_]Term{.{ .variable = "X" }};
+    const results = try eval.query(.{ .predicate = "before_c", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    // "apple" and "banana" are lexicographically before "cherry"
+    try std.testing.expectEqual(@as(usize, 2), results.len);
 }

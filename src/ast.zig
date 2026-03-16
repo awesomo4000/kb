@@ -105,14 +105,42 @@ pub const Atom = struct {
     }
 };
 
+pub const CompOp = enum {
+    eq,
+    neq,
+    lt,
+    gt,
+    le,
+    ge,
+
+    pub fn format(self: CompOp, writer: anytype) !void {
+        try writer.writeAll(switch (self) {
+            .eq => "=",
+            .neq => "!=",
+            .lt => "<",
+            .gt => ">",
+            .le => "<=",
+            .ge => ">=",
+        });
+    }
+};
+
+pub const Comparison = struct {
+    left: Term,
+    op: CompOp,
+    right: Term,
+};
+
 pub const BodyElement = union(enum) {
     atom: Atom,
     negated_atom: Atom,
+    comparison: Comparison,
 
-    pub fn getAtom(self: BodyElement) Atom {
+    pub fn getAtom(self: BodyElement) ?Atom {
         return switch (self) {
             .atom => |a| a,
             .negated_atom => |a| a,
+            .comparison => null,
         };
     }
 
@@ -127,6 +155,13 @@ pub const BodyElement = union(enum) {
                 try writer.writeAll("not ");
                 try writer.print("{f}", .{a});
             },
+            .comparison => |cmp| {
+                try writer.print("{f}", .{cmp.left});
+                try writer.writeAll(" ");
+                try writer.print("{f}", .{cmp.op});
+                try writer.writeAll(" ");
+                try writer.print("{f}", .{cmp.right});
+            },
         }
     }
 
@@ -134,6 +169,11 @@ pub const BodyElement = union(enum) {
         return switch (self) {
             .atom => |a| .{ .atom = try a.dupe(allocator) },
             .negated_atom => |a| .{ .negated_atom = try a.dupe(allocator) },
+            .comparison => |cmp| .{ .comparison = .{
+                .left = try cmp.left.dupe(allocator),
+                .op = cmp.op,
+                .right = try cmp.right.dupe(allocator),
+            } },
         };
     }
 
@@ -141,6 +181,10 @@ pub const BodyElement = union(enum) {
         switch (self) {
             .atom => |a| a.free(allocator),
             .negated_atom => |a| a.free(allocator),
+            .comparison => |cmp| {
+                cmp.left.free(allocator);
+                cmp.right.free(allocator);
+            },
         }
     }
 };
