@@ -33,9 +33,17 @@ has_cross_domain(U) :- member_of(U, _), member_of(_, U).
 **In scope:**
 
 - Parser desugars `_` to fresh internal variable names
-- Works in rule bodies, facts, and queries
+- Works in rule bodies and queries
 - Each `_` is independent (no unification between wildcards)
 - Internal names use `#` character to prevent collision with user variables
+
+**Note on facts:** Wildcards are syntactically accepted in fact heads (e.g.
+`foo(_).`) but have no effect. The parser desugars `_` to a variable like
+`_#0`, and `addGroundFacts` calls `internTerm` on each head term. For
+variables, `internTerm` returns `null` → the `orelse continue` skips the
+fact entirely. The fact is silently dropped. This is consistent with how
+regular variables in fact heads work — `foo(X).` is equally meaningless
+because there's no binding for `X`. No special handling needed.
 
 **Out of scope:**
 
