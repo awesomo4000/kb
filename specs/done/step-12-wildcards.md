@@ -1,5 +1,7 @@
 # Step 12: Wildcard Terms
 
+> **STATUS: DONE** — Merged in PR #27 (commit 20ed105).
+
 Adds `_` as a wildcard term in rule bodies and queries. Each `_` matches any
 value independently — two wildcards in the same rule never unify with each
 other.
@@ -313,16 +315,16 @@ test "bitmap eval: multiple independent wildcards" {
 
 ## 7. Checklist
 
-- [ ] Add `anon_counter: u32 = 0` to Parser struct
-- [ ] Reset counter at start of `parseRule`
-- [ ] Reset counter at start of query parsing
-- [ ] Add `_` check in `parseTerm` — generate `_#N` variable
-- [ ] Only bare `_` is wildcard, not `_foo` or `_Unused`
-- [ ] Test: wildcard desugars to variable with `#` in name
-- [ ] Test: multiple wildcards get different names
-- [ ] Test: counter resets per rule
-- [ ] Test: `_bar` is not a wildcard
-- [ ] Test: evaluator integration — wildcard in rule body
-- [ ] Test: evaluator integration — multiple independent wildcards
-- [ ] `zig build test` passes
-- [ ] `zig build test-all` passes
+- [x] Add `anon_counter: u32 = 0` to Parser struct
+- [x] Reset counter at start of `parseRule`
+- [x] Reset counter at start of query parsing
+- [x] Add `_` check in `parseTerm` — generate `_#N` variable
+- [x] Only bare `_` is wildcard, not `_foo` or `_Unused`
+- [x] Test: wildcard desugars to variable with `#` in name
+- [x] Test: multiple wildcards get different names
+- [x] Test: counter resets per rule
+- [x] Test: `_bar` is not a wildcard
+- [x] Test: evaluator integration — wildcard in rule body
+- [x] Test: evaluator integration — multiple independent wildcards
+- [x] `zig build test` passes
+- [x] `zig build test-all` passes
