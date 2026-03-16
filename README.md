@@ -7,14 +7,14 @@ A hypergraph fact store with Datalog queries, backed by LMDB and roaring bitmaps
 Everything is stored as **facts** — hyperedges connecting typed entities:
 
 ```json
-{"edges": [["author", "Homer"], ["book", "The Iliad"], ["rel", "wrote"]], "source": "library"}
+{"edges": [["player", "Alice"], ["team", "Rockets"], ["rel", "plays_for"]], "source": "league"}
 ```
 
 Query from any angle:
 ```bash
-kb get author/Homer          # What did Homer write?
-kb get book/The\ Iliad       # Who wrote The Iliad?
-kb get rel/wrote             # All author-book relationships
+kb get player/Alice          # What team is Alice on?
+kb get team/Rockets          # Who plays for the Rockets?
+kb get rel/plays_for         # All player-team relationships
 ```
 
 ## Install
@@ -27,7 +27,7 @@ zig build   # Requires Zig 0.15.2
 
 ```bash
 kb ingest data.jsonl          # Load facts from JSONL
-kb get author/                # Browse entities
+kb get team/                  # Browse entities
 kb datalog rules.dl           # Run Datalog rules and queries
 ```
 
@@ -36,13 +36,13 @@ kb datalog rules.dl           # Run Datalog rules and queries
 Each fact connects multiple typed entities as a hyperedge. The store indexes every entity for fast lookups from any direction.
 
 ```json
-{"edges": [["author", "Virgil"], ["author", "Homer"], ["rel", "influenced"]], "source": "library"}
+{"edges": [["team", "Wolves"], ["team", "Rockets"], ["rel", "won"]], "source": "league"}
 ```
 
 Use `@map` directives in `.dl` files to bridge hypergraph facts into Datalog predicates:
 ```prolog
-@map wrote(A, B) = [rel:wrote, author:A, book:B].
-@map influenced(A, B) = [rel:influenced, author:A, author:B].
+@map plays_for(P, T) = [rel:plays_for, player:P, team:T].
+@map won(W, L) = [rel:won, team:W, team:L].
 ```
 
 ## Language Features
@@ -52,16 +52,16 @@ kb uses Datalog — a declarative language where you define rules that derive ne
 ### Rules and recursion
 
 ```prolog
-influenced("Homer", "Virgil").
-influenced("Virgil", "Dante").
+won("Wolves", "Rockets").
+won("Bears", "Wolves").
 
 % Direct rule
-tradition(X, Y) :- influenced(X, Y).
+dominates(A, B) :- won(A, B).
 
 % Recursive — finds the full chain no matter how deep
-tradition(X, Z) :- influenced(X, Y), tradition(Y, Z).
+dominates(A, C) :- won(A, B), dominates(B, C).
 
-?- tradition("Homer", X).   % X = Virgil, X = Dante
+?- dominates("Bears", X).   % X = Wolves, X = Rockets
 ```
 
 ### Wildcards
@@ -69,7 +69,7 @@ tradition(X, Z) :- influenced(X, Y), tradition(Y, Z).
 Use `_` to ignore a position. Each `_` is independent.
 
 ```prolog
-has_connections(S) :- connection(S, _).   % any server that connects somewhere
+has_roster(T) :- plays_for(_, T).   % any team with at least one player
 ```
 
 ### Stratified negation
