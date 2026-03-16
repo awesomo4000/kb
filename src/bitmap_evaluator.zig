@@ -370,8 +370,8 @@ pub const BitmapEvaluator = struct {
         cmp: Comparison,
         var_bindings: *const std.StringHashMapUnmanaged(u32),
     ) bool {
-        const left_str = self.resolveTermToString(cmp.left, var_bindings) orelse return true;
-        const right_str = self.resolveTermToString(cmp.right, var_bindings) orelse return true;
+        const left_str = self.resolveTermToString(cmp.left, var_bindings) orelse return false;
+        const right_str = self.resolveTermToString(cmp.right, var_bindings) orelse return false;
         return numericOrStringCompare(left_str, right_str, cmp.op);
     }
 
