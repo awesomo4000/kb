@@ -9,6 +9,9 @@ pub const Entity = @import("fact.zig").Entity;
 // Datalog engine
 pub const datalog = @import("datalog.zig");
 
+// AST types (also re-exported from datalog for backward compatibility)
+pub const ast = @import("ast.zig");
+
 // String interner for bitmap evaluator
 pub const StringInterner = @import("string_interner.zig").StringInterner;
 
@@ -33,6 +36,7 @@ pub const entity_key = @import("entity_key.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = @import("datalog.zig");
+    _ = @import("ast.zig");
     _ = @import("string_interner.zig");
     _ = @import("relation.zig");
     _ = @import("fact_fetcher.zig");
