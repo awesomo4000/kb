@@ -19,6 +19,7 @@ pub const Comparison = ast.Comparison;
 pub const TokenType = enum {
     identifier, // foo, Bar, _x
     string, // "hello"
+    number, // 42, 443, 8080
     lparen, // (
     rparen, // )
     lbracket, // [
@@ -132,6 +133,11 @@ pub const Lexer = struct {
             return self.readIdentifier(start, start_col);
         }
 
+        // Numeric literal
+        if (c >= '0' and c <= '9') {
+            return self.readNumber(start, start_col);
+        }
+
         // Unknown character
         self.pos += 1;
         self.col += 1;
@@ -193,6 +199,14 @@ pub const Lexer = struct {
             self.col += 1;
         }
         return .{ .type = .identifier, .text = self.source[start..self.pos], .line = self.line, .col = start_col };
+    }
+
+    fn readNumber(self: *Lexer, start: usize, start_col: usize) Token {
+        while (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '9') {
+            self.pos += 1;
+            self.col += 1;
+        }
+        return .{ .type = .number, .text = self.source[start..self.pos], .line = self.line, .col = start_col };
     }
 
     fn skipWhitespaceAndComments(self: *Lexer) void {
@@ -441,8 +455,8 @@ pub const Parser = struct {
         }
 
         // Check for comparison: term op term
-        // A comparison starts with an identifier or string, followed by a comparison operator.
-        if (self.current.type == .identifier or self.current.type == .string) {
+        // A comparison starts with an identifier, string, or number, followed by a comparison operator.
+        if (self.current.type == .identifier or self.current.type == .string or self.current.type == .number) {
             const peek_type = self.peekNextType();
             if (isComparisonOp(peek_type)) {
                 const left = try self.parseTerm();
@@ -546,6 +560,13 @@ pub const Parser = struct {
 
     fn parseTerm(self: *Parser) ParseError!Term {
         if (self.current.type == .string) {
+            const text = try self.allocator().dupe(u8, self.current.text);
+            self.advance();
+            return .{ .constant = text };
+        }
+
+        // Bare number literal → constant with the digit text
+        if (self.current.type == .number) {
             const text = try self.allocator().dupe(u8, self.current.text);
             self.advance();
             return .{ .constant = text };
@@ -1137,4 +1158,93 @@ test "parser not-equal comparison" {
 
     try std.testing.expect(rule.body[1] == .comparison);
     try std.testing.expectEqual(CompOp.neq, rule.body[1].comparison.op);
+}
+
+// =============================================================================
+// Bare number literal tests
+// =============================================================================
+
+test "lexer number literal" {
+    var lexer = Lexer.init("42");
+    const tok = lexer.next();
+    try std.testing.expectEqual(TokenType.number, tok.type);
+    try std.testing.expectEqualStrings("42", tok.text);
+}
+
+test "lexer number in context" {
+    var lexer = Lexer.init("points(X, 28).");
+    try std.testing.expectEqual(TokenType.identifier, lexer.next().type); // points
+    try std.testing.expectEqual(TokenType.lparen, lexer.next().type);
+    try std.testing.expectEqual(TokenType.identifier, lexer.next().type); // X
+    try std.testing.expectEqual(TokenType.comma, lexer.next().type);
+    const num = lexer.next();
+    try std.testing.expectEqual(TokenType.number, num.type);
+    try std.testing.expectEqualStrings("28", num.text);
+    try std.testing.expectEqual(TokenType.rparen, lexer.next().type);
+    try std.testing.expectEqual(TokenType.dot, lexer.next().type);
+}
+
+test "parser bare number in fact" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "points(\"Alice\", 28).");
+    defer parser.deinit();
+
+    const result = try parser.parseProgram();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rules.len);
+    const head = result.rules[0].head;
+    try std.testing.expectEqual(@as(usize, 2), head.terms.len);
+    try std.testing.expect(head.terms[1] == .constant);
+    try std.testing.expectEqualStrings("28", head.terms[1].constant);
+}
+
+test "parser bare number in comparison" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "high(X) :- score(X, S), S > 20.");
+    defer parser.deinit();
+
+    const result = try parser.parseProgram();
+
+    const rule = result.rules[0];
+    try std.testing.expect(rule.body[1] == .comparison);
+    const cmp = rule.body[1].comparison;
+    try std.testing.expectEqual(CompOp.gt, cmp.op);
+    try std.testing.expect(cmp.right == .constant);
+    try std.testing.expectEqualStrings("20", cmp.right.constant);
+}
+
+test "parser bare number identical to quoted" {
+    const allocator = std.testing.allocator;
+
+    var parser1 = Parser.init(allocator, "score(\"Alice\", 28).");
+    defer parser1.deinit();
+    const r1 = try parser1.parseProgram();
+
+    var parser2 = Parser.init(allocator, "score(\"Alice\", \"28\").");
+    defer parser2.deinit();
+    const r2 = try parser2.parseProgram();
+
+    // Both produce the same constant term
+    const t1 = r1.rules[0].head.terms[1];
+    const t2 = r2.rules[0].head.terms[1];
+    try std.testing.expect(t1 == .constant);
+    try std.testing.expect(t2 == .constant);
+    try std.testing.expectEqualStrings(t1.constant, t2.constant);
+}
+
+test "parser number on left side of comparison" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "check(X) :- val(X), 10 < X.");
+    defer parser.deinit();
+
+    const result = try parser.parseProgram();
+
+    const rule = result.rules[0];
+    try std.testing.expect(rule.body[1] == .comparison);
+    const cmp = rule.body[1].comparison;
+    try std.testing.expect(cmp.left == .constant);
+    try std.testing.expectEqualStrings("10", cmp.left.constant);
+    try std.testing.expectEqual(CompOp.lt, cmp.op);
+    try std.testing.expect(cmp.right == .variable);
+    try std.testing.expectEqualStrings("X", cmp.right.variable);
 }
