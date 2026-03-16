@@ -128,6 +128,81 @@ else
     echo "  OK: unstratifiable program rejected"
 fi
 
+# Test 8: Wildcards
+echo ""
+echo "--- Test: Wildcards ---"
+WC_DL=$(mktemp /tmp/kb-test-XXXXXX.dl)
+cat > "$WC_DL" << 'EOF'
+edge("a", "b"). edge("b", "c"). edge("c", "d").
+has_outgoing(X) :- edge(X, _).
+has_incoming(X) :- edge(_, X).
+?- has_outgoing(X).
+?- has_incoming(X).
+EOF
+OUTPUT=$(cd /tmp && "$KB" datalog "$WC_DL" 2>&1)
+assert_contains "$OUTPUT" "has_outgoing(X)" "wildcard query ran"
+assert_contains "$OUTPUT" "X = a" "a has outgoing"
+assert_contains "$OUTPUT" "X = b" "b has outgoing"
+assert_contains "$OUTPUT" "X = c" "c has outgoing"
+assert_contains "$OUTPUT" "X = d" "d has incoming"
+rm -f "$WC_DL"
+
+# Test 9: Comparisons
+echo ""
+echo "--- Test: Comparisons ---"
+CMP_DL=$(mktemp /tmp/kb-test-XXXXXX.dl)
+cat > "$CMP_DL" << 'EOF'
+score("alice", "90"). score("bob", "40"). score("carol", "75"). score("dave", "10").
+high(X) :- score(X, S), S > "50".
+low(X) :- score(X, S), S <= "20".
+exact(X) :- score(X, S), S = "75".
+not_bob(X) :- score(X, _), X != "bob".
+mid(X) :- score(X, S), S >= "40", S < "80".
+?- high(X).
+?- low(X).
+?- exact(X).
+?- not_bob(X).
+?- mid(X).
+EOF
+OUTPUT=$(cd /tmp && "$KB" datalog "$CMP_DL" 2>&1)
+assert_contains "$OUTPUT" "high(X)" "gt query ran"
+assert_contains "$OUTPUT" "X = alice" "alice is high scorer"
+assert_contains "$OUTPUT" "X = carol" "carol is high scorer"
+assert_contains "$OUTPUT" "low(X)" "le query ran"
+assert_contains "$OUTPUT" "X = dave" "dave is low scorer"
+assert_contains "$OUTPUT" "exact(X)" "eq query ran"
+assert_contains "$OUTPUT" "X = carol" "carol exact 75"
+assert_contains "$OUTPUT" "not_bob(X)" "neq query ran"
+assert_contains "$OUTPUT" "mid(X)" "range query ran"
+assert_contains "$OUTPUT" "X = bob" "bob in mid range"
+rm -f "$CMP_DL"
+
+# Test 10: Combined demo (recursion + wildcards + negation + comparisons)
+echo ""
+echo "--- Test: Combined demo ---"
+OUTPUT=$(cd /tmp && "$KB" datalog "$FIXTURES/demo.dl" 2>&1)
+# High scorers: 20+ points
+assert_contains "$OUTPUT" "high_scorer(P)" "high_scorer query ran"
+assert_contains "$OUTPUT" "P = Alice" "Alice is high scorer"
+assert_contains "$OUTPUT" "P = Grace" "Grace is high scorer"
+assert_contains "$OUTPUT" "(4 results)" "4 high scorers"
+# Mid scorers: 10-19 range
+assert_contains "$OUTPUT" "mid_scorer(P)" "mid_scorer query ran"
+assert_contains "$OUTPUT" "P = Bob" "Bob is mid scorer"
+assert_contains "$OUTPUT" "P = Hank" "Hank is mid scorer"
+# Dominance (recursion)
+assert_contains "$OUTPUT" "dominates" "dominates query ran"
+assert_contains "$OUTPUT" "X = Rockets" "Wolves dominate Rockets"
+assert_contains "$OUTPUT" "(1 results)" "1 dominance result for Wolves"
+# Negation: unbeaten teams
+assert_contains "$OUTPUT" "unbeaten(X)" "unbeaten query ran"
+assert_contains "$OUTPUT" "X = Falcons" "Falcons are unbeaten"
+# Combined: top threats (high scorers on teams dominating Rockets)
+assert_contains "$OUTPUT" "top_threat(P)" "top_threat query ran"
+assert_contains "$OUTPUT" "P = Carol" "Carol is a top threat"
+assert_contains "$OUTPUT" "P = Eve" "Eve is a top threat"
+assert_contains "$OUTPUT" "(3 results)" "3 top threats"
+
 # Clean up
 rm -rf "$TEST_DB"
 
