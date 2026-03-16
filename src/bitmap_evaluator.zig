@@ -1648,3 +1648,34 @@ test "bitmap eval: string fallback comparison" {
     // "apple" and "banana" are lexicographically before "cherry"
     try std.testing.expectEqual(@as(usize, 2), results.len);
 }
+
+test "bitmap eval: bare number in comparison" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\points("Alice", 28). points("Bob", 12). points("Carol", 75).
+        \\high(X) :- points(X, S), S > 20.
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    var q_terms = [_]Term{.{ .variable = "X" }};
+    const results = try eval.query(.{ .predicate = "high", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    var found_alice = false;
+    var found_carol = false;
+    for (results) |r| {
+        const x = r.get("X").?;
+        if (std.mem.eql(u8, x, "Alice")) found_alice = true;
+        if (std.mem.eql(u8, x, "Carol")) found_carol = true;
+    }
+    try std.testing.expect(found_alice);
+    try std.testing.expect(found_carol);
+}
