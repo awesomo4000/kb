@@ -1375,3 +1375,50 @@ test "bitmap eval: binary relation negation" {
     try std.testing.expectEqualStrings("Plato", results[0].get("X").?);
     try std.testing.expectEqualStrings("The Republic", results[0].get("Y").?);
 }
+
+test "bitmap eval: wildcard in rule body" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\member_of("alice", "developers").
+        \\member_of("bob", "admins").
+        \\member_of("charlie", "developers").
+        \\is_member(U) :- member_of(U, _).
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    var q_terms = [_]datalog.Term{.{ .variable = "X" }};
+    const results = try eval.query(.{ .predicate = "is_member", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    try std.testing.expectEqual(@as(usize, 3), results.len);
+}
+
+test "bitmap eval: multiple independent wildcards" {
+    const allocator = std.testing.allocator;
+
+    var parser = datalog.Parser.init(allocator,
+        \\edge("a", "b"). edge("b", "c"). edge("c", "a").
+        \\has_both(X) :- edge(X, _), edge(_, X).
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    var eval = BitmapEvaluator.init(allocator, parsed.rules);
+    defer eval.deinit();
+    try eval.addGroundFacts(parsed.rules);
+    try eval.evaluate();
+
+    var q_terms = [_]datalog.Term{.{ .variable = "X" }};
+    const results = try eval.query(.{ .predicate = "has_both", .terms = &q_terms });
+    defer eval.freeQueryResults(results);
+
+    // a->b and c->a, b->c and a->b, c->a and b->c -- all three nodes qualify
+    try std.testing.expectEqual(@as(usize, 3), results.len);
+}

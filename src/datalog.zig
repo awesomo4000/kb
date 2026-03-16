@@ -413,6 +413,9 @@ pub const Parser = struct {
     arena: std.heap.ArenaAllocator,
     source: []const u8,
 
+    // Wildcard counter — reset per rule/query for fresh anonymous variable names
+    anon_counter: u32 = 0,
+
     // Error context - populated when parse fails
     error_line: usize = 0,
     error_col: usize = 0,
@@ -536,6 +539,7 @@ pub const Parser = struct {
             } else if (self.current.type == .query) {
                 // Query: ?- body.
                 self.advance();
+                self.anon_counter = 0;
                 const body = try self.parseQueryBody();
                 try self.expect(.dot);
                 try queries.append(self.allocator(), body);
@@ -555,6 +559,7 @@ pub const Parser = struct {
     }
 
     pub fn parseRule(self: *Parser) ParseError!Rule {
+        self.anon_counter = 0;
         const head = try self.parseAtom();
 
         if (self.current.type == .dot) {
@@ -658,15 +663,25 @@ pub const Parser = struct {
         }
 
         if (self.current.type == .identifier) {
-            const text = try self.allocator().dupe(u8, self.current.text);
+            const text = self.current.text;
+
+            // Wildcard: bare "_" becomes a fresh anonymous variable
+            if (text.len == 1 and text[0] == '_') {
+                const name = std.fmt.allocPrint(self.allocator(), "_#{}", .{self.anon_counter}) catch return error.OutOfMemory;
+                self.anon_counter += 1;
+                self.advance();
+                return .{ .variable = name };
+            }
+
+            const duped = try self.allocator().dupe(u8, text);
             self.advance();
 
             // Variables start with uppercase
-            if (text.len > 0 and text[0] >= 'A' and text[0] <= 'Z') {
-                return .{ .variable = text };
+            if (duped.len > 0 and duped[0] >= 'A' and duped[0] <= 'Z') {
+                return .{ .variable = duped };
             }
             // Constants start with lowercase
-            return .{ .constant = text };
+            return .{ .constant = duped };
         }
 
         self.setError("expected variable, constant, or string");
@@ -1067,4 +1082,68 @@ test "parser multiple negations in rule body" {
 
     try std.testing.expect(rule.body[2] == .negated_atom);
     try std.testing.expectEqualStrings("modern", rule.body[2].negated_atom.predicate);
+}
+
+test "parser wildcard desugaring" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "is_member(U) :- member_of(U, _).");
+    defer parser.deinit();
+
+    const result = try parser.parseProgram();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rules.len);
+    const rule = result.rules[0];
+    const body_atom = rule.body[0].atom;
+
+    // Second term should be a variable (not constant), with generated name
+    try std.testing.expect(body_atom.terms[1] == .variable);
+    // Name contains # so it cannot collide with user variables
+    try std.testing.expect(std.mem.indexOfScalar(u8, body_atom.terms[1].variable, '#') != null);
+}
+
+test "parser multiple wildcards are independent" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "cross(U) :- member_of(U, _), member_of(_, U).");
+    defer parser.deinit();
+
+    const result = try parser.parseProgram();
+
+    const rule = result.rules[0];
+    const wc1 = rule.body[0].atom.terms[1]; // first _
+    const wc2 = rule.body[1].atom.terms[0]; // second _
+
+    // Both are variables
+    try std.testing.expect(wc1 == .variable);
+    try std.testing.expect(wc2 == .variable);
+    // They have different names
+    try std.testing.expect(!std.mem.eql(u8, wc1.variable, wc2.variable));
+}
+
+test "parser wildcard counter resets per rule" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator,
+        \\a(X) :- b(X, _).
+        \\c(X) :- d(X, _).
+    );
+    defer parser.deinit();
+
+    const result = try parser.parseProgram();
+
+    // Both rules should have _#0 as their wildcard (counter resets)
+    const wc1 = result.rules[0].body[0].atom.terms[1];
+    const wc2 = result.rules[1].body[0].atom.terms[1];
+    try std.testing.expectEqualStrings(wc1.variable, wc2.variable);
+}
+
+test "parser underscore prefix identifiers are not wildcards" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "foo(_bar).");
+    defer parser.deinit();
+
+    const result = try parser.parseProgram();
+
+    // _bar starts with lowercase, so it is a constant -- not a wildcard
+    const term = result.rules[0].head.terms[0];
+    try std.testing.expect(term == .constant);
+    try std.testing.expectEqualStrings("_bar", term.constant);
 }
