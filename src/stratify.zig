@@ -3,10 +3,12 @@ const Allocator = std.mem.Allocator;
 const datalog = @import("datalog.zig");
 const Rule = datalog.Rule;
 const BodyElement = datalog.BodyElement;
+const Term = datalog.Term;
 
 pub const StratificationError = error{
     UnstratifiableProgram,
     UnsafeNegation,
+    UnsafeComparison,
     OutOfMemory,
 };
 
@@ -30,7 +32,7 @@ fn buildDepGraph(rules: []const Rule, allocator: Allocator) !DepGraph {
         // Ensure head predicate exists in graph
         _ = try getOrCreateNode(&graph, head, allocator);
         for (rule.body) |elem| {
-            const atom = elem.getAtom();
+            const atom = elem.getAtom() orelse continue;
             // Edge: head depends on body predicate
             const edge = DepEdge{
                 .target = atom.predicate,
@@ -177,45 +179,75 @@ fn hasNegation(rules: []const Rule) bool {
     return false;
 }
 
-/// Validate that all variables in negated atoms are bound by positive atoms
-/// in the same rule body. This is the standard Datalog safety requirement.
+/// Check if a rule has any negated atoms or comparisons requiring safety validation.
+fn needsSafetyCheck(rule: Rule) bool {
+    for (rule.body) |elem| {
+        switch (elem) {
+            .negated_atom, .comparison => return true,
+            .atom => {},
+        }
+    }
+    return false;
+}
+
+/// Check if a variable is bound by a positive atom in the rule body.
+fn isBoundByPositiveAtom(variable: []const u8, body: []const BodyElement) bool {
+    for (body) |other_elem| {
+        if (other_elem != .atom) continue;
+        const pos_atom = other_elem.atom;
+        for (pos_atom.terms) |pos_term| {
+            switch (pos_term) {
+                .variable => |pv| {
+                    if (std.mem.eql(u8, variable, pv)) {
+                        return true;
+                    }
+                },
+                .constant => {},
+            }
+        }
+    }
+    return false;
+}
+
+/// Validate that all variables in negated atoms and comparisons are bound by
+/// positive atoms in the same rule body. This is the standard Datalog safety requirement.
 pub fn validateSafety(rules: []const Rule) StratificationError!void {
     for (rules) |rule| {
         if (rule.body.len == 0) continue;
-        if (!hasNegation(&[_]Rule{rule})) continue;
+        if (!needsSafetyCheck(rule)) continue;
 
-        // Collect variables bound by positive atoms
+        // Check negated atoms
         for (rule.body) |elem| {
             if (elem != .negated_atom) continue;
             const neg_atom = elem.negated_atom;
 
-            // Check each variable in the negated atom
             for (neg_atom.terms) |term| {
                 switch (term) {
                     .variable => |v| {
-                        // Check if this variable appears in any positive atom
-                        var bound = false;
-                        for (rule.body) |other_elem| {
-                            if (other_elem != .atom) continue;
-                            const pos_atom = other_elem.atom;
-                            for (pos_atom.terms) |pos_term| {
-                                switch (pos_term) {
-                                    .variable => |pv| {
-                                        if (std.mem.eql(u8, v, pv)) {
-                                            bound = true;
-                                            break;
-                                        }
-                                    },
-                                    .constant => {},
-                                }
-                                if (bound) break;
-                            }
-                            if (bound) break;
-                        }
-                        if (!bound) {
+                        if (!isBoundByPositiveAtom(v, rule.body)) {
                             std.debug.print("error: unsafe rule \xe2\x80\x94 variable \"{s}\" appears only in negation\n", .{v});
                             printRule(rule);
                             return error.UnsafeNegation;
+                        }
+                    },
+                    .constant => {},
+                }
+            }
+        }
+
+        // Check comparisons
+        for (rule.body) |elem| {
+            if (elem != .comparison) continue;
+            const cmp = elem.comparison;
+
+            const terms = [_]Term{ cmp.left, cmp.right };
+            for (&terms) |term| {
+                switch (term) {
+                    .variable => |v| {
+                        if (!isBoundByPositiveAtom(v, rule.body)) {
+                            std.debug.print("error: unsafe rule \xe2\x80\x94 variable \"{s}\" in comparison not bound by positive atom\n", .{v});
+                            printRule(rule);
+                            return error.UnsafeComparison;
                         }
                     },
                     .constant => {},
@@ -537,4 +569,43 @@ test "unsafe negation with unbound variable in negated binary" {
 
     const result = stratify(parsed.rules, allocator);
     try std.testing.expectError(error.UnsafeNegation, result);
+}
+
+test "comparisons transparent to stratification deps" {
+    const allocator = std.testing.allocator;
+    var parser = datalog.Parser.init(allocator,
+        \\score("alice", "90"). score("bob", "40").
+        \\high(X) :- score(X, S), S > "50".
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    // Should succeed: comparisons don't add dependency edges
+    const strata = try stratify(parsed.rules, allocator);
+    defer freeStrata(strata, allocator);
+
+    try std.testing.expect(strata.len >= 1);
+
+    // Find the stratum with the high rule
+    var found_high = false;
+    for (strata) |stratum| {
+        for (stratum.rules) |rule| {
+            if (std.mem.eql(u8, rule.head.predicate, "high")) {
+                found_high = true;
+            }
+        }
+    }
+    try std.testing.expect(found_high);
+}
+
+test "unsafe comparison variable rejected" {
+    const allocator = std.testing.allocator;
+    var parser = datalog.Parser.init(allocator,
+        \\bad(X) :- score(X, S), S > V.
+    );
+    defer parser.deinit();
+    const parsed = try parser.parseProgram();
+
+    const result = stratify(parsed.rules, allocator);
+    try std.testing.expectError(error.UnsafeComparison, result);
 }
