@@ -1,21 +1,20 @@
 # kb
 
-A hypergraph-based fact store with Datalog queries.
+A hypergraph fact store with Datalog queries, backed by LMDB and roaring bitmaps.
 
 ## Core Idea
 
-Everything is stored as **facts** — hyperedges connecting multiple typed entities.
+Everything is stored as **facts** — hyperedges connecting typed entities:
 
 ```json
-{"edges": [["author", "george"], ["book", "1984"], ["rel", "wrote"]], "source": "library"}
-{"edges": [["author", "george"], ["book", "animal_farm"], ["rel", "wrote"]], "source": "library"}
+{"edges": [["player", "Alice"], ["team", "Rockets"], ["rel", "plays_for"]], "source": "league"}
 ```
 
 Query from any angle:
 ```bash
-kb get author/george         # What did george write?
-kb get book/1984             # Who wrote 1984?
-kb get rel/wrote             # All author-book relationships
+kb get player/Alice          # What team is Alice on?
+kb get team/Rockets          # Who plays for the Rockets?
+kb get rel/plays_for         # All player-team relationships
 ```
 
 ## Install
@@ -27,86 +26,103 @@ zig build   # Requires Zig 0.15.2
 ## Usage
 
 ```bash
-# Ingest facts from JSONL
-kb ingest data.jsonl
-
-# Query entities
-kb get author/
-kb get author/george
-kb get author/george/book/
-
-# Run Datalog rules
-kb datalog rules.dl
-```
-
-## Datalog
-
-Define rules over the hypergraph using `@map` directives:
-
-```prolog
-% Map hypergraph facts to predicates
-@map wrote(A, B) = [rel:wrote, author:A, book:B].
-
-% Define derived relationships
-influenced_by(A, C) :- wrote(A, B), references(B, C).
-
-% Query
-?- influenced_by(A, C).
+kb ingest data.jsonl          # Load facts from JSONL
+kb get team/                  # Browse entities
+kb datalog rules.dl           # Run Datalog rules and queries
 ```
 
 ## Fact Format
 
+Each fact connects multiple typed entities as a hyperedge. The store indexes every entity for fast lookups from any direction.
+
 ```json
-{
-  "edges": [["author", "Virgil"], ["author", "Homer"], ["rel", "influenced"]],
-  "source": "library"
-}
+{"edges": [["team", "Wolves"], ["team", "Rockets"], ["rel", "won"]], "source": "league"}
 ```
 
-Each fact connects multiple typed entities. The hypergraph indexes by entity for fast lookups from any direction.
+Use `@map` directives in `.dl` files to bridge hypergraph facts into Datalog predicates:
+```prolog
+@map plays_for(P, T) = [rel:plays_for, player:P, team:T].
+@map won(W, L) = [rel:won, team:W, team:L].
+```
+
+## Language Features
+
+kb uses Datalog — a declarative language where you define rules that derive new facts from existing ones. The engine applies rules repeatedly until no new facts are derived (fixpoint).
+
+### Rules and recursion
+
+```prolog
+won("Wolves", "Rockets").
+won("Bears", "Wolves").
+
+% Direct rule
+dominates(A, B) :- won(A, B).
+
+% Recursive — finds the full chain no matter how deep
+dominates(A, C) :- won(A, B), dominates(B, C).
+
+?- dominates("Bears", X).   % X = Wolves, X = Rockets
+```
+
+### Wildcards
+
+Use `_` to ignore a position. Each `_` is independent.
+
+```prolog
+has_roster(T) :- plays_for(_, T).   % any team with at least one player
+```
+
+### Stratified negation
+
+`not` filters out bindings where a fact exists. Variables in negated atoms must appear in a positive atom in the same rule (safety requirement). Rules with negation are automatically stratified.
+
+```prolog
+loser(T) :- won(_, T).
+unbeaten(T) :- team(T), not loser(T).
+```
+
+### Comparison operators
+
+`=`, `!=`, `<`, `>`, `<=`, `>=` filter bindings without generating new facts. Both sides must be bound by a positive atom. Numeric when both values parse as integers, lexicographic otherwise.
+
+```prolog
+high_scorer(P) :- points(P, Pts), Pts >= "20".
+mid_range(P)   :- points(P, Pts), Pts >= "10", Pts < "20".
+rivals(A, B)   :- won(A, B), A != B.
+```
+
+### Putting it together
+
+A complete example combining all features — see `tests/fixtures/demo.dl`:
+
+```prolog
+% Facts
+plays_for("Alice", "Rockets").  plays_for("Carol", "Wolves").
+points("Alice", "28").          points("Carol", "35").
+won("Wolves", "Rockets").       won("Bears", "Wolves").
+
+% Recursive dominance
+dominates(A, B) :- won(A, B).
+dominates(A, C) :- won(A, B), dominates(B, C).
+
+% Negation: teams with no losses
+loser(T) :- won(_, T).
+unbeaten(T) :- team(T), not loser(T).
+
+% Comparisons + recursion: high scorers on dominant teams
+high_on_team(P, T) :- points(P, Pts), Pts >= "20", plays_for(P, T).
+top_threat(P) :- high_on_team(P, T), dominates(T, "Rockets").
+
+?- top_threat(P).   % Carol (Wolves dominate Rockets, Carol scored 35)
+```
+
+## Evaluation
+
+Rules are evaluated using a bitmap-based semi-naive engine. Relations are stored as roaring bitmap sets, and joins are computed via bitmap intersection. Stratification handles negation by partitioning rules into layers evaluated in dependency order.
 
 ## Storage
 
-Uses LMDB for memory-mapped, concurrent-read storage. Data persists in `.kb/` directory.
-
-## How Datalog Works
-
-Datalog is a declarative query language where you define **rules** that derive new facts from existing ones.
-
-**Facts** are things you know:
-```prolog
-influenced("Virgil", "Homer").   % Virgil was influenced by Homer
-influenced("Dante", "Virgil").   % Dante was influenced by Virgil
-```
-
-**Rules** derive new facts:
-```prolog
-influenced_by(A, C) :- influenced(A, B), influenced(B, C).
-```
-
-This reads: "A is influenced by C **if** A is influenced by B **and** B is influenced by C."
-
-**Evaluation** repeatedly applies rules until no new facts are derived:
-```
-Start:    influenced(Virgil,Homer), influenced(Dante,Virgil)
-Apply:    influenced_by(Dante,Homer)  ← new fact derived!
-Apply:    (no more new facts)
-Done.
-```
-
-**Queries** ask what's true:
-```prolog
-?- influenced_by(X, "Homer").   % Who was influenced by Homer?
-   X = Dante
-```
-
-The power is in **recursive rules** — finding transitive relationships:
-```prolog
-tradition(X, Y) :- influenced(X, Y).
-tradition(X, Z) :- influenced(X, Y), tradition(Y, Z).
-```
-
-This finds all authors in a literary tradition, no matter how many generations back. The engine keeps applying rules until it reaches a fixpoint (no new facts). You describe *what* you want, not *how* to compute it.
+LMDB provides memory-mapped, concurrent-read storage. Data persists in the `.kb/` directory.
 
 ## License
 

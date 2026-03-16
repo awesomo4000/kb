@@ -1,0 +1,67 @@
+% Sports league analysis
+% Demonstrates recursion, wildcards, comparisons, and negation together.
+
+% === Facts ===
+
+% Players and their teams
+plays_for("Alice", "Rockets").
+plays_for("Bob", "Rockets").
+plays_for("Carol", "Wolves").
+plays_for("Dave", "Wolves").
+plays_for("Eve", "Bears").
+plays_for("Frank", "Bears").
+plays_for("Grace", "Falcons").
+plays_for("Hank", "Falcons").
+
+% Points scored (season total)
+points("Alice", "28").
+points("Bob", "12").
+points("Carol", "35").
+points("Dave", "8").
+points("Eve", "22").
+points("Frank", "5").
+points("Grace", "40").
+points("Hank", "18").
+
+% Head-to-head results: won(winner, loser)
+won("Wolves", "Rockets").
+won("Bears", "Wolves").
+won("Falcons", "Bears").
+
+% Teams
+team("Rockets"). team("Wolves"). team("Bears"). team("Falcons").
+
+% === Rules ===
+
+% Wildcards: every team that has at least one player
+active_team(T) :- plays_for(_, T).
+
+% Comparisons: high scorers (20+ points)
+high_scorer(P) :- points(P, Pts), Pts >= "20".
+
+% Range: mid-range scorers (10-19 points)
+mid_scorer(P) :- points(P, Pts), Pts >= "10", Pts < "20".
+
+% Not-equal: rivals (different teams that played each other)
+rivals(A, B) :- won(A, B), A != B.
+
+% Recursion: transitive dominance chain
+dominates(A, B) :- won(A, B).
+dominates(A, C) :- won(A, B), dominates(B, C).
+
+% Negation: teams with no losses
+loser(T) :- won(_, T).
+unbeaten(T) :- team(T), not loser(T).
+
+% Combined: high scorers on teams that dominate the Rockets
+% We keep the points in the derived relation so downstream joins work.
+high_on_team(P, T) :- points(P, Pts), Pts >= "20", plays_for(P, T).
+top_threat(P) :- high_on_team(P, T), dominates(T, "Rockets").
+
+% === Queries ===
+
+?- high_scorer(P).
+?- mid_scorer(P).
+?- dominates("Wolves", X).
+?- unbeaten(X).
+?- top_threat(P).
