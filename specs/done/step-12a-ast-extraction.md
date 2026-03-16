@@ -1,5 +1,7 @@
 # Step 12a: Extract AST types from datalog.zig
 
+> **STATUS: DONE** — Merged in PR #30 (commit d0c26e7).
+
 Pure refactor — no behavioral changes. Moves AST type definitions out of
 `datalog.zig` into a dedicated `ast.zig` module to separate data types from
 parsing logic. Prepares for the comparison operator step, which adds new AST
@@ -103,28 +105,9 @@ _ = @import("ast.zig");
 import paths. Files that do `const Rule = datalog.Rule` continue to work
 because `datalog.Rule` is re-exported from `ast.Rule`.
 
-Future steps (like comparison operators) can import directly from `ast.zig`
-if they prefer, but nothing is forced to change now.
-
 ---
 
-## 4. Test Migration
-
-Tests stay with the code they test:
-
-- **AST type tests** — currently there are no standalone AST unit tests
-  (the types are tested indirectly through parser and evaluator tests).
-  Nothing to move.
-
-- **Lexer tests** — stay in `datalog.zig` (test lexer tokens, comments,
-  string literals, etc.)
-
-- **Parser tests** — stay in `datalog.zig` (test parsing rules, queries,
-  negation, wildcards, error formatting, etc.)
-
----
-
-## 5. File Changes
+## 4. File Changes
 
 | File | Change |
 |---|---|
@@ -134,24 +117,13 @@ Tests stay with the code they test:
 
 ---
 
-## 6. Verification
+## 5. Checklist
 
-This is a pure refactor. The verification is simple:
-
-- `zig build test` passes (all existing tests unchanged)
-- `zig build test-all` passes (integration tests unchanged)
-- No behavioral changes — just moving type definitions between files
-- All re-exports preserve backward compatibility
-
----
-
-## 7. Checklist
-
-- [ ] Create `src/ast.zig` with Term, Atom, BodyElement, Rule, Mapping, Binding
-- [ ] Remove AST type definitions from `src/datalog.zig`
-- [ ] Add `ast.zig` import and re-exports to `src/datalog.zig`
-- [ ] Add `ast` export to `src/lib.zig`
-- [ ] Add `ast.zig` to test block in `src/lib.zig`
-- [ ] `zig build test` passes
-- [ ] `zig build test-all` passes
-- [ ] No downstream import changes needed
+- [x] Create `src/ast.zig` with Term, Atom, BodyElement, Rule, Mapping, Binding
+- [x] Remove AST type definitions from `src/datalog.zig`
+- [x] Add `ast.zig` import and re-exports to `src/datalog.zig`
+- [x] Add `ast` export to `src/lib.zig`
+- [x] Add `ast.zig` to test block in `src/lib.zig`
+- [x] `zig build test` passes
+- [x] `zig build test-all` passes
+- [x] No downstream import changes needed
